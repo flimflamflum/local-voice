@@ -20,6 +20,7 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/").replace("://localhost", "://127.0.0.1")
         self._sizes = {}  # model name -> file size in bytes
         self._no_force = set()  # models that wouldn't load fully onto the GPU
+        self._no_think = set()  # models Ollama says can't think (e.g. llama3.1)
 
     def list_models(self):
         r = requests.get(f"{self.base_url}/api/tags", timeout=5)
@@ -83,35 +84,49 @@ class OllamaClient:
         if new:
             self.warm_up(new)
 
-    def stream_chat(self, model, messages, cancel: threading.Event, temperature=0.8):
-        """Yield content tokens. Stops early when `cancel` is set."""
+    def can_think(self, model):
+        """False once Ollama has refused thinking for this model."""
+        return model not in self._no_think
+
+    def stream_chat(self, model, messages, cancel: threading.Event, temperature=0.8,
+                    think=False, on_thinking=None):
+        """Yield content tokens. Stops early when `cancel` is set.
+
+        With think=True the model reasons first; that reasoning arrives in a separate
+        field and goes to on_thinking(text), never into the yielded reply.
+        """
+        think = bool(think) and self.can_think(model)
         body = {
             "model": model,
             "messages": messages,
             "stream": True,
-            "think": False,
+            "think": think,
             "keep_alive": "30m",
-            # num_predict is a last-resort token cap (ReplyLimiter normally stops it far sooner)
-            "options": self._options(model, temperature=temperature, num_predict=1024),
+            # num_predict is a last-resort token cap (ReplyLimiter normally stops the reply far
+            # sooner). Thinking tokens count toward it too, so give a thinking model more room.
+            "options": self._options(model, temperature=temperature, num_predict=3072 if think else 1024),
         }
-        yield from self._chat(body, cancel)
+        yield from self._chat(body, cancel, on_thinking)
 
-    def _chat(self, body, cancel):
+    def _chat(self, body, cancel, on_thinking=None):
         retry = False
         with requests.post(f"{self.base_url}/api/chat", json=body, stream=True, timeout=300) as r:
             if r.status_code == 400 and "think" in body and "think" in r.text.lower():
+                if body["think"]:
+                    self._no_think.add(body["model"])
+                    body["options"]["num_predict"] = 1024
                 body.pop("think")  # model/older server doesn't understand the flag
                 retry = True
             elif self._gave_up_full_gpu(body["model"], body["options"], r):
                 retry = True
             else:
                 r.raise_for_status()
-                yield from self._iter(r, cancel)
+                yield from self._iter(r, cancel, on_thinking)
         if retry:
-            yield from self._chat(body, cancel)
+            yield from self._chat(body, cancel, on_thinking)
 
     @staticmethod
-    def _iter(resp, cancel):
+    def _iter(resp, cancel, on_thinking=None):
         for line in resp.iter_lines():
             if cancel.is_set():
                 return
@@ -120,7 +135,11 @@ class OllamaClient:
             chunk = json.loads(line)
             if chunk.get("error"):
                 raise RuntimeError(chunk["error"])
-            token = chunk.get("message", {}).get("content", "")
+            message = chunk.get("message", {})
+            thought = message.get("thinking", "")
+            if thought and on_thinking:
+                on_thinking(thought)
+            token = message.get("content", "")
             if token:
                 yield token
             if chunk.get("done"):

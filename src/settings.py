@@ -13,6 +13,7 @@ DEFAULTS = {
     "volume": 100,             # 0..100
     "speak_replies": True,
     "hands_free": False,       # auto re-listen after Jarvis finishes talking
+    "think": False,            # let thinking models reason before answering (slower, smarter)
     "style": "playful",        # tone preset, see src/prompt.py STYLES
     "whisper_model": "base.en",
     "user_name": "",

@@ -49,7 +49,7 @@ Each personality is a short tone prompt placed at the start of the system prompt
 | File | What it does |
 |---|---|
 | `src/stt.py` | Captures the mic, stops on silence, and runs **faster-whisper** on the CPU so the GPU stays free for the LLM |
-| `src/llm.py` | Streams from Ollama's `/api/chat` with thinking off. When you switch models, it unloads the old one first |
+| `src/llm.py` | Streams from Ollama's `/api/chat`. Thinking is off unless you turn on **Think before answering** in Settings; the reasoning then appears under a collapsed **See thinking** tab above the reply and is never spoken. When you switch models, it unloads the old one first |
 | `src/textutil.py` | Splits the stream into speakable sentences or clauses, strips markdown and emoji for speech |
 | `src/tts.py` | **Kokoro** (neural, ONNX) or Windows SAPI voices. Synthesis runs ahead of playback, and everything plays through one continuous audio stream so there are no gaps between sentences |
 | `src/prompt.py` | The personality and voice-friendly rules. Edit it to change how Jarvis talks |

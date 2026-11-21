@@ -117,6 +117,22 @@ const handlers = {
     };
     tick();
   },
+  // Reasoning from a thinking model: goes into the collapsed "See thinking" panel.
+  thought({ id, t, secs }) {
+    const b = bubbles.get(id);
+    if (!b) return;
+    const th = b.thoughts || (b.thoughts = makeThoughts(b));
+    if (t) {
+      th.body.append(t);
+      if (th.el.open) th.body.scrollTop = th.body.scrollHeight;
+    }
+    if (secs != null) endThoughts(th, secs);
+  },
+  cant_think(model) {
+    if (warnedNoThink.has(model)) return;
+    warnedNoThink.add(model);
+    toast(`${prettyModel(model)} can't think, so it answered straight away`, 4500);
+  },
   assistant_done(id) {
     const b = bubbles.get(id);
     if (!b) return;
@@ -164,8 +180,47 @@ function finishReveal(b) {
 
 function closeBubble(id, b) {
   b.el.classList.remove("streaming");
-  if (!b.text.trim()) b.el.remove();
+  if (b.thoughts) endThoughts(b.thoughts);
+  if (!b.text.trim()) {
+    if (!b.thoughts?.body.textContent.trim()) b.el.remove();
+    else b.el.querySelector(".bubble").innerHTML = '<span class="no-answer">Stopped before it could answer.</span>';
+  }
   bubbles.delete(id);
+}
+
+// ------------------------------------------------------------- thinking
+const warnedNoThink = new Set();
+
+function makeThoughts(b) {
+  const el = document.createElement("details");
+  el.className = "thoughts live";
+  el.innerHTML =
+    '<summary><span class="th-dot"></span><span class="th-label">Thinking…</span>' +
+    '<span class="th-time"></span>' +
+    '<svg viewBox="0 0 24 24" class="th-chev"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    "</summary><div class=\"th-body\"></div>";
+  b.el.insertBefore(el, b.el.querySelector(".bubble"));
+  const th = { el, body: el.querySelector(".th-body"), label: el.querySelector(".th-label"),
+               time: el.querySelector(".th-time"), start: performance.now(), done: false };
+  const tickTime = () => (th.time.textContent = `${Math.floor((performance.now() - th.start) / 1000)}s`);
+  tickTime();
+  th.timer = setInterval(tickTime, 250);
+  el.addEventListener("toggle", () => {
+    if (th.done) th.label.textContent = el.open ? "Hide thinking" : "See thinking";
+    if (el.open) th.body.scrollTop = th.done ? 0 : th.body.scrollHeight;
+  });
+  scrollChat();
+  return th;
+}
+
+function endThoughts(th, secs) {
+  if (th.done) return;
+  th.done = true;
+  clearInterval(th.timer);
+  th.el.classList.remove("live");
+  th.label.textContent = th.el.open ? "Hide thinking" : "See thinking";
+  const s = secs ?? (performance.now() - th.start) / 1000;
+  th.time.textContent = s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
 }
 
 window.jarvis = {
@@ -205,6 +260,7 @@ $("newChatBtn").addEventListener("click", newChat);
 
 function newChat() {
   api?.new_chat();
+  for (const b of bubbles.values()) clearInterval(b.thoughts?.timer);
   bubbles.clear();
   $("chat").innerHTML =
     '<div class="empty" id="emptyState"><div class="empty-title">Fresh start.</div><div class="empty-sub">Memory wiped. What\'s on your mind?</div></div>';
@@ -326,6 +382,10 @@ function bindSettings() {
   $("volume").addEventListener("input", (e) => ($("volumeVal").textContent = e.target.value + "%"));
   $("volume").addEventListener("change", (e) => save({ volume: +e.target.value }));
   $("speakReplies").addEventListener("change", (e) => save({ speak_replies: e.target.checked }));
+  $("thinkMode").addEventListener("change", (e) => {
+    save({ think: e.target.checked });
+    toast(e.target.checked ? "Thinking on: smarter answers, slower to start" : "Thinking off: instant answers");
+  });
   $("handsFree").addEventListener("change", (e) => {
     save({ hands_free: e.target.checked });
     toast(e.target.checked ? "Hands-free on: I'll keep listening after I reply" : "Hands-free off");
@@ -358,6 +418,7 @@ function applySettings(s, models, voices, styles) {
   $("volumeVal").textContent = s.volume + "%";
   $("speakReplies").checked = s.speak_replies;
   $("handsFree").checked = s.hands_free;
+  $("thinkMode").checked = !!s.think;
   $("whisperSelect").value = s.whisper_model;
   $("userName").value = s.user_name || "";
   $("assistantName").value = s.assistant_name || "Jarvis";

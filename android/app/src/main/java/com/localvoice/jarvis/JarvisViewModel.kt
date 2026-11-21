@@ -27,6 +27,18 @@ enum class Role { User, Jarvis, Info }
 class ChatMsg(val id: Long, val role: Role, text: String, live: Boolean = false) {
     var text by mutableStateOf(text)
     var live by mutableStateOf(live)
+
+    // Reasoning from a thinking model, shown under a collapsed "See thinking" tab.
+    var thoughts by mutableStateOf("")
+    var thinking by mutableStateOf(false)            // still reasoning (live timer)
+    var thinkSecs by mutableStateOf<Double?>(null)   // how long it thought, once done
+    var thinkStart = 0L
+
+    fun endThinking(secs: Double? = null) {
+        if (!thinking) return
+        thinking = false
+        thinkSecs = secs ?: ((System.currentTimeMillis() - thinkStart) / 1000.0)
+    }
 }
 
 class JarvisViewModel(app: Application) : AndroidViewModel(app) {
@@ -196,6 +208,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         if (p.voice.isNotEmpty()) put("voice", p.voice)
         put("rate", p.rate)
         put("server_voice", p.serverVoice)
+        put("think", p.think)
     }
 
     private fun startListening() {
@@ -300,6 +313,17 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
                 target = ""
                 bubble = add(Role.Jarvis, "", live = true)
             }
+            "thought" -> {
+                if (m.optInt("id") != turnId) return
+                val b = bubble ?: return
+                if (!b.thinking && b.thinkSecs == null) {
+                    b.thinking = true
+                    b.thinkStart = System.currentTimeMillis()
+                }
+                b.thoughts += m.optString("text")
+                if (!m.isNull("secs")) b.endThinking(m.optDouble("secs"))
+            }
+            "notice" -> info(m.optString("message"))
             "done" -> {
                 val id = m.optInt("id")
                 if (id != turnId) return
@@ -359,7 +383,10 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         bubble?.let {
             it.text = target.trim()
             it.live = false
-            if (it.text.isEmpty()) messages.remove(it)
+            it.endThinking()
+            if (it.text.isEmpty()) {
+                if (it.thoughts.isBlank()) messages.remove(it) else it.text = NO_ANSWER
+            }
         }
         bubble = null
         turnId = -1
@@ -373,8 +400,13 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         revealJob?.cancel()
         bubble?.let {
             it.live = false
+            it.endThinking()
             val said = shown.trim()
-            if (said.isEmpty()) messages.remove(it) else it.text = "$said —"
+            when {
+                said.isNotEmpty() -> it.text = "$said —"
+                it.thoughts.isNotBlank() -> it.text = NO_ANSWER
+                else -> messages.remove(it)
+            }
         }
         bubble = null
         turnId = -1
@@ -399,6 +431,8 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         phoneVoice.shutdown()
     }
 }
+
+const val NO_ANSWER = "Stopped before it could answer."
 
 private fun JSONArray?.strings(): List<String> =
     if (this == null) emptyList() else List(length()) { optString(it) }

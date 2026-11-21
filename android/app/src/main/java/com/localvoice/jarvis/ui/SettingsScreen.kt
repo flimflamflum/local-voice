@@ -142,6 +142,13 @@ fun SettingsScreen(vm: JarvisViewModel) {
             Picker("Model", vm.models.map { it to it }, p.model) { id -> vm.updatePrefs { it.copy(model = id) } }
             Gap()
             Picker("Personality", vm.styles, p.style) { id -> vm.updatePrefs { it.copy(style = id) } }
+            Gap(6)
+            Toggle(
+                "Think before answering",
+                "Smarter replies, but slower to start talking. Needs a model that can think " +
+                    "(e.g. Qwen 3.5). Tap \"See thinking\" above a reply to read its reasoning.",
+                p.think,
+            ) { on -> vm.updatePrefs { it.copy(think = on) } }
 
             // ------------------------------------------------------------ voice
             SectionTitle("Voice")

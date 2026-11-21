@@ -5,6 +5,23 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.coroutines.delay
+import java.util.Locale
+import kotlin.math.roundToInt
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -162,7 +179,7 @@ private fun TopBar(vm: JarvisViewModel) {
 private fun Chat(vm: JarvisViewModel, modifier: Modifier) {
     val list = rememberLazyListState()
     val last = vm.messages.lastOrNull()
-    LaunchedEffect(vm.messages.size, last?.text) {
+    LaunchedEffect(vm.messages.size, last?.text, last?.thinking) {
         if (vm.messages.isNotEmpty()) list.scrollToItem(vm.messages.size - 1)
     }
     if (vm.messages.isEmpty()) {
@@ -192,8 +209,12 @@ private fun Bubble(m: ChatMsg) {
             m.text, color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
-        Role.User, Role.Jarvis -> {
+        Role.User, Role.Jarvis -> Column {
             val user = m.role == Role.User
+            if (!user && (m.thinking || m.thoughts.isNotBlank())) {
+                ThoughtsTab(m)
+                Spacer(Modifier.height(6.dp))
+            }
             Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart) {
                 val shape = RoundedCornerShape(
                     topStart = 18.dp, topEnd = 18.dp,
@@ -214,6 +235,86 @@ private fun Bubble(m: ChatMsg) {
         }
     }
 }
+
+/** Collapsed "See thinking" tab above a reply; tap to read the model's reasoning. */
+@Composable
+private fun ThoughtsTab(m: ChatMsg) {
+    var open by rememberSaveable(m.id) { mutableStateOf(false) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    if (m.thinking) {
+        LaunchedEffect(m.id) {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(250)
+            }
+        }
+    }
+    val secs = m.thinkSecs ?: ((now - m.thinkStart) / 1000.0)
+    val time = when {
+        m.thinking -> "${secs.toInt()}s"
+        secs < 10 -> String.format(Locale.US, "%.1fs", secs)
+        else -> "${secs.roundToInt()}s"
+    }
+    val label = when {
+        m.thinking -> "Thinking…"
+        open -> "Hide thinking"
+        else -> "See thinking"
+    }
+    val pulse by rememberInfiniteTransition(label = "think").animateFloat(
+        initialValue = 0.3f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse), label = "pulse",
+    )
+    val shape = RoundedCornerShape(12.dp)
+    Column(
+        Modifier
+            .widthIn(max = 310.dp)
+            .clip(shape)
+            .background(Panel.copy(alpha = 0.5f))
+            .border(1.dp, Line, shape)
+            .animateContentSize()
+    ) {
+        Row(
+            Modifier
+                .clickable { open = !open }
+                .padding(horizontal = 11.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(ThinkColor.copy(alpha = if (m.thinking) pulse else 0.55f))
+            )
+            Spacer(Modifier.size(8.dp))
+            Text(label, color = if (m.thinking) TextColor else Muted, fontSize = 13.sp)
+            Spacer(Modifier.size(8.dp))
+            Text(time, color = Faint, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            Spacer(Modifier.size(6.dp))
+            Text(if (open) "▾" else "▸", color = Faint, fontSize = 12.sp)
+        }
+        if (open) {
+            val scroll = rememberScrollState()
+            LaunchedEffect(m.thoughts.length) { if (m.thinking) scroll.scrollTo(scroll.maxValue) }
+            Box(
+                Modifier
+                    .padding(start = 11.dp, end = 11.dp, bottom = 10.dp)
+                    .heightIn(max = 260.dp)
+                    .drawBehind {
+                        drawRect(ThinkColor.copy(alpha = 0.35f), size = Size(2.dp.toPx(), size.height))
+                    }
+                    .padding(start = 12.dp)
+            ) {
+                Text(
+                    m.thoughts.trim(),
+                    color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+                    modifier = Modifier.verticalScroll(scroll),
+                )
+            }
+        }
+    }
+}
+
+private val ThinkColor = Color(0xFFB18CFF)
 
 @Composable
 private fun Composer(onSend: (String) -> Unit) {

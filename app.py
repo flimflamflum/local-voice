@@ -18,7 +18,7 @@ from src.llm import OllamaClient
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber, is_real_speech
-from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, clean_for_speech
+from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, ThoughtStream, clean_for_speech
 from src.tts import Speaker
 
 ROOT = Path(__file__).resolve().parent
@@ -196,7 +196,12 @@ class Api:
             self._model_switch.join(timeout=120)  # old model out before we ask the new one
         self._emit("assistant_start", gen)
         speak = s.get("speak_replies")
-        think, chunker, limiter = ThinkFilter(), SentenceChunker(), ReplyLimiter(text)
+        model = s.get("model")
+        # Reasoning goes to the collapsible "See thinking" panel, never into the reply.
+        thoughts = ThoughtStream(
+            lambda t, secs: gen == self._gen and self._emit("thought", {"id": gen, "t": t, "secs": secs})
+        )
+        think, chunker, limiter = ThinkFilter(thoughts.add), SentenceChunker(), ReplyLimiter(text)
         full, said, spoke_any, quoted, cut = "", "", False, False, False
 
         def queue_sentences(sentences):
@@ -219,10 +224,14 @@ class Api:
                 cut = limiter.done(raw, clean)  # said enough: stop at this sentence
 
         try:
-            for token in self._ollama.stream_chat(s.get("model"), messages, cancel, s.get("temperature")):
+            stream = self._ollama.stream_chat(
+                model, messages, cancel, s.get("temperature"), think=s.get("think"), on_thinking=thoughts.add
+            )
+            for token in stream:
                 visible = think.feed(token)
                 if not visible:
                     continue
+                thoughts.finish()  # the answer has started
                 if not full:
                     visible = visible.lstrip()
                     if visible[:1] in ('"', "“"):  # small models like to quote their whole reply
@@ -243,6 +252,9 @@ class Api:
             if gen == self._gen:
                 self._emit("error", f"Ollama error: {e}")
         finally:
+            thoughts.finish()
+            if s.get("think") and not self._ollama.can_think(model) and gen == self._gen:
+                self._emit("cant_think", model)
             reply = said.strip()
             if quoted:
                 reply = reply.rstrip('"”').rstrip()

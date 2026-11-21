@@ -16,10 +16,14 @@ Protocol (one WebSocket per conversation, at ws://<pc>:8765/ws):
                JSON  {"type": "state", "state": "transcribing" | "waiting" | "thinking" | "idle"}
                JSON  {"type": "transcript", "text"}            ("" = nothing understood)
                JSON  {"type": "turn", "id"}                    reply starting
+               JSON  {"type": "thought", "id", "text", "secs"}   reasoning (think on); secs is set
+                     on the last one, when the answer starts
                JSON  {"type": "chunk", "id", "text", "duration", "bytes", "rate"}
                      then (if bytes > 0) BINARY 24 kHz mono PCM16 audio for that chunk
                JSON  {"type": "done", "id"} | {"type": "error", "message"} | {"type": "pong"}
-  settings: model, style, voice, rate, server_voice (false = text only, phone speaks it)
+               JSON  {"type": "notice", "message"}             one-off heads-up for the user
+  settings: model, style, voice, rate, server_voice (false = text only, phone speaks it),
+            think (true = thinking models reason first; the reasoning comes as "thought")
 """
 import asyncio
 import collections
@@ -41,7 +45,7 @@ from src.llm import OllamaClient  # noqa: E402
 from src.prompt import DEFAULT_STYLE, build_system_prompt, style_options  # noqa: E402
 from src.settings import Settings  # noqa: E402
 from src.stt import Transcriber, is_real_speech  # noqa: E402
-from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, clean_for_speech  # noqa: E402
+from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, ThoughtStream, clean_for_speech  # noqa: E402
 from src.tts import OUT_RATE, Synthesizer, get_kokoro, to_pcm16  # noqa: E402
 
 from src.link import load_config, local_addresses  # noqa: E402
@@ -86,6 +90,7 @@ def default_settings():
         "voice": SETTINGS.get("voice"),
         "rate": SETTINGS.get("rate"),
         "server_voice": True,
+        "think": False,  # off unless the phone asks (older app builds can't show the reasoning)
     }
 
 
@@ -103,6 +108,7 @@ class Conversation:
         self.audio = None  # bytearray while recording
         self.send_lock = asyncio.Lock()
         self.tasks = set()
+        self.warned_no_think = set()  # models we've already said can't think
 
     # ------------------------------------------------------------ helpers
     async def send(self, obj, binary: bytes = b""):
@@ -207,6 +213,9 @@ class Conversation:
                 if isinstance(item, Exception):
                     await self.send({"type": "error", "message": f"Ollama error: {item}"})
                     continue
+                if isinstance(item, dict):  # thought / notice
+                    await self.send(item)
+                    continue
                 raw, fut = item
                 pcm, duration = b"", 0.0
                 if fut is not None:
@@ -225,7 +234,10 @@ class Conversation:
     def _produce(self, q, turn, cancel, s, messages):
         """LLM thread: stream tokens, cut them into speakable chunks, queue synthesis."""
         put = lambda item: self.loop.call_soon_threadsafe(q.put_nowait, item)  # noqa: E731
-        think, chunker = ThinkFilter(), SentenceChunker()
+        thoughts = ThoughtStream(
+            lambda t, secs: put({"type": "thought", "id": turn, "text": t, "secs": secs})
+        )
+        think, chunker = ThinkFilter(thoughts.add), SentenceChunker()
         limiter = ReplyLimiter(messages[-1]["content"])
         full, said, quoted, cut = "", "", False, False
 
@@ -243,10 +255,15 @@ class Conversation:
                 cut = limiter.done(raw, clean)  # said enough: stop at this sentence
 
         try:
-            for token in OLLAMA.stream_chat(s["model"], messages, cancel, SETTINGS.get("temperature")):
+            stream = OLLAMA.stream_chat(
+                s["model"], messages, cancel, SETTINGS.get("temperature"),
+                think=s.get("think"), on_thinking=thoughts.add,
+            )
+            for token in stream:
                 visible = think.feed(token)
                 if not visible:
                     continue
+                thoughts.finish()  # the answer has started
                 if not full:
                     visible = visible.lstrip()
                     if visible[:1] in ('"', "“"):  # small models like to quote their whole reply
@@ -266,6 +283,12 @@ class Conversation:
             traceback.print_exc()
             put(e)
         finally:
+            thoughts.finish()
+            model = s["model"]
+            if s.get("think") and not OLLAMA.can_think(model) and model not in self.warned_no_think:
+                self.warned_no_think.add(model)
+                name = model.split("/")[-1].removesuffix(":latest")
+                put({"type": "notice", "message": f"{name} can't think, so it answered straight away."})
             reply = said.strip()
             if quoted:
                 reply = reply.rstrip('"”').rstrip()

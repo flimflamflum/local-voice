@@ -21,6 +21,7 @@ data class Prefs(
     val rate: Int = 1,
     val serverVoice: Boolean = true,
     val handsFree: Boolean = false,
+    val think: Boolean = false,
     val session: String = "",
 ) {
     val configured get() = server.isNotBlank() && token.isNotBlank()
@@ -36,6 +37,7 @@ class SettingsStore(private val context: Context) {
         val rate = intPreferencesKey("rate")
         val serverVoice = booleanPreferencesKey("server_voice")
         val handsFree = booleanPreferencesKey("hands_free")
+        val think = booleanPreferencesKey("think")
         val session = stringPreferencesKey("session")
     }
 
@@ -50,6 +52,7 @@ class SettingsStore(private val context: Context) {
             rate = p[K.rate] ?: 1,
             serverVoice = p[K.serverVoice] ?: true,
             handsFree = p[K.handsFree] ?: false,
+            think = p[K.think] ?: false,
             session = p[K.session] ?: "",
         )
         if (prefs.session.isEmpty()) {
@@ -70,6 +73,7 @@ class SettingsStore(private val context: Context) {
             e[K.rate] = prefs.rate
             e[K.serverVoice] = prefs.serverVoice
             e[K.handsFree] = prefs.handsFree
+            e[K.think] = prefs.think
             e[K.session] = prefs.session
         }
     }

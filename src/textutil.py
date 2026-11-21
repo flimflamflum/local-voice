@@ -1,5 +1,6 @@
 """Helpers for turning streamed model output into speakable sentences."""
 import re
+import time
 
 _CODE_BLOCK = re.compile(r"```.*?```", re.S)
 _INLINE_CODE = re.compile(r"`([^`]*)`")
@@ -134,11 +135,16 @@ class ReplyLimiter:
 
 
 class ThinkFilter:
-    """Removes <think>...</think> sections from a token stream (reasoning models)."""
+    """Removes <think>...</think> sections from a token stream (reasoning models).
 
-    def __init__(self):
+    Some models write their reasoning inline in tags instead of Ollama's separate field;
+    the removed text goes to on_think(text) so it can still be shown.
+    """
+
+    def __init__(self, on_think=None):
         self.in_think = False
         self.pending = ""
+        self.on_think = on_think or (lambda _t: None)
 
     def feed(self, token: str) -> str:
         self.pending += token
@@ -147,8 +153,13 @@ class ThinkFilter:
             if self.in_think:
                 i = self.pending.find("</think>")
                 if i == -1:
-                    self.pending = self.pending[-8:]
+                    # pass on everything but a possible partial "</think" tag at the end
+                    keep = next((k for k in range(min(8, len(self.pending)), 0, -1)
+                                 if "</think>".startswith(self.pending[-k:])), 0)
+                    self.on_think(self.pending[:len(self.pending) - keep])
+                    self.pending = self.pending[len(self.pending) - keep:]
                     return out
+                self.on_think(self.pending[:i])
                 self.pending = self.pending[i + 8:]
                 self.in_think = False
             else:
@@ -167,3 +178,48 @@ class ThinkFilter:
                 self.pending = self.pending[i + 7:]
                 self.in_think = True
         return out
+
+
+class ThoughtStream:
+    """Collects a reply's reasoning and hands it to `emit` in batches.
+
+    Thinking streams fast (~40 tokens/s); batching keeps the UI from being flooded
+    with one update per token.
+    """
+
+    def __init__(self, emit, interval=0.15):
+        self.emit = emit
+        self.interval = interval
+        self.buf = ""
+        self.started = None  # time.monotonic() of the first thought
+        self.finished = False
+        self._last = 0.0
+
+    def add(self, text: str):
+        if not text or self.finished:
+            return
+        now = time.monotonic()
+        if self.started is None:
+            self.started = now
+            text = text.lstrip()
+            if not text:
+                return
+        self.buf += text
+        if now - self._last >= self.interval:
+            self._flush(now)
+
+    def _flush(self, now):
+        if self.buf:
+            self.emit(self.buf, None)
+            self.buf = ""
+        self._last = now
+
+    def finish(self):
+        """Call when the reply starts (or the turn ends). Sends the rest + how long it took."""
+        if self.finished or self.started is None:
+            self.finished = True
+            return
+        self.finished = True
+        now = time.monotonic()
+        rest, self.buf = self.buf.rstrip(), ""
+        self.emit(rest, round(now - self.started, 1))
