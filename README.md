@@ -43,7 +43,7 @@ The settings (gear icon) cover:
 - hands-free mode, which keeps listening after each reply
 - the Whisper model size
 
-Each personality is a short tone prompt placed at the start of the system prompt. Add your own in `STYLES` in `src/prompt.py`.
+Each personality is a short tone prompt placed at the start of the system prompt. **Normal** sends no system prompt at all, so you get the model's raw behaviour. Add your own in `STYLES` in `src/prompt.py`.
 
 ## How it works
 | File | What it does |

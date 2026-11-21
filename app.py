@@ -164,9 +164,8 @@ class Api:
         self._history.append({"role": "user", "content": text})
         self._history[:] = self._history[-MAX_HISTORY:]
         s = self._settings
-        messages = [
-            {"role": "system", "content": build_system_prompt(s.get("assistant_name"), s.get("user_name"), s.get("style"))}
-        ] + self._history
+        system = build_system_prompt(s.get("assistant_name"), s.get("user_name"), s.get("style"))
+        messages = ([{"role": "system", "content": system}] if system else []) + self._history
 
         self._set_state("thinking")
         if self._model_switch is not None:

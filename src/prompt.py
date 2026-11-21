@@ -8,12 +8,8 @@ from datetime import datetime
 
 # id -> (label shown in settings, tone prompt placed at the very start of the chat)
 STYLES = {
-    "normal": (
-        "Normal",
-        "Your style: plain and straight to the point. Answer exactly what was asked and then stop. No "
-        "greetings, no jokes, no filler, no compliments on the question, and never end with a follow-up "
-        "question or an offer of more help like \"anything else I can help with?\".",
-    ),
+    # No prompt at all: the model gets your messages exactly as said, with no system prompt.
+    "normal": ("Normal", None),
     "playful": (
         "Playful",
         "Your style: upbeat, quick-witted, a little cheeky and warm, like a clever friend who happens to know "
@@ -87,10 +83,14 @@ def style_options():
     return [(k, label) for k, (label, _) in STYLES.items()]
 
 
-def build_system_prompt(assistant_name: str, user_name: str, style: str = DEFAULT_STYLE) -> str:
+def build_system_prompt(assistant_name: str, user_name: str, style: str = DEFAULT_STYLE):
+    """The full system prompt, or None for a style that uses no prompt at all."""
+    tone = STYLES.get(style, STYLES[DEFAULT_STYLE])[1]
+    if tone is None:
+        return None
     user_name = (user_name or "").strip()
     return SYSTEM_PROMPT.format(
-        style=STYLES.get(style, STYLES[DEFAULT_STYLE])[1],
+        style=tone,
         assistant=assistant_name or "Jarvis",
         user_ref=f"{user_name}'s" if user_name else "the user's",
         now=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " "),
