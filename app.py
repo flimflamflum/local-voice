@@ -173,7 +173,7 @@ class Api:
         self._emit("assistant_start", gen)
         speak = s.get("speak_replies")
         think, chunker = ThinkFilter(), SentenceChunker()
-        full, spoke_any = "", False
+        full, spoke_any, quoted = "", False, False
 
         def queue_sentences(sentences):
             # When speaking, each sentence's text is shown the moment its audio
@@ -196,6 +196,8 @@ class Api:
                     continue
                 if not full:
                     visible = visible.lstrip()
+                    if visible[:1] in ('"', "“"):  # small models like to quote their whole reply
+                        visible, quoted = visible[1:].lstrip(), True
                     if not visible:
                         continue
                 full += visible
@@ -204,14 +206,20 @@ class Api:
                 else:
                     self._emit("token", {"id": gen, "t": visible})
             if speak and gen == self._gen:
-                queue_sentences(chunker.flush())
+                tail = chunker.flush()
+                if quoted and tail:
+                    tail[-1] = tail[-1].rstrip().rstrip('"”')
+                queue_sentences(tail)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             if gen == self._gen:
                 self._emit("error", f"Ollama error: {e}")
         finally:
-            if full.strip():
-                self._history.append({"role": "assistant", "content": full.strip()})
+            reply = full.strip()
+            if quoted:
+                reply = reply.rstrip('"”').rstrip()
+            if reply:
+                self._history.append({"role": "assistant", "content": reply})
             if speak and gen == self._gen:
                 # fires after the last sentence has played
                 self._speaker.say("", on_play=lambda _d: self._emit("assistant_done", gen))

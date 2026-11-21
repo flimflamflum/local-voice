@@ -17,7 +17,7 @@ DEFAULTS = {
     "user_name": "",
     "assistant_name": "Jarvis",
     "temperature": 0.8,
-    "ollama_url": "http://localhost:11434",
+    "ollama_url": "http://127.0.0.1:11434",
 }
 
 

@@ -9,7 +9,9 @@ NUM_CTX = 4096  # small context keeps more of the model on your 4 GB GPU
 
 class OllamaClient:
     def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
+        # On Windows "localhost" tries IPv6 (::1) first; Ollama only listens on IPv4,
+        # so every request stalled ~2 s before falling back. Go straight to IPv4.
+        self.base_url = base_url.rstrip("/").replace("://localhost", "://127.0.0.1")
 
     def list_models(self):
         r = requests.get(f"{self.base_url}/api/tags", timeout=5)
