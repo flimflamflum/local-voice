@@ -18,7 +18,7 @@ from src.llm import OllamaClient
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber, is_real_speech
-from src.textutil import SentenceChunker, ThinkFilter, clean_for_speech
+from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, clean_for_speech
 from src.tts import Speaker
 
 ROOT = Path(__file__).resolve().parent
@@ -196,22 +196,27 @@ class Api:
             self._model_switch.join(timeout=120)  # old model out before we ask the new one
         self._emit("assistant_start", gen)
         speak = s.get("speak_replies")
-        think, chunker = ThinkFilter(), SentenceChunker()
-        full, spoke_any, quoted = "", False, False
+        think, chunker, limiter = ThinkFilter(), SentenceChunker(), ReplyLimiter(text)
+        full, said, spoke_any, quoted, cut = "", "", False, False, False
 
         def queue_sentences(sentences):
             # When speaking, each sentence's text is shown the moment its audio
             # starts playing, so the chat text and the voice move together.
-            nonlocal spoke_any
+            nonlocal spoke_any, said, cut
             for raw in sentences:
-                if gen != self._gen:
+                if gen != self._gen or cut:
                     return
                 clean = clean_for_speech(raw)
-                spoke_any = spoke_any or bool(clean)
-                self._speaker.say(
-                    clean,
-                    on_play=lambda dur, raw=raw: self._emit("reveal", {"id": gen, "t": raw, "dur": dur}),
-                )
+                if speak:
+                    spoke_any = spoke_any or bool(clean)
+                    self._speaker.say(
+                        clean,
+                        on_play=lambda dur, raw=raw: self._emit("reveal", {"id": gen, "t": raw, "dur": dur}),
+                    )
+                else:
+                    self._emit("token", {"id": gen, "t": raw})
+                said += raw
+                cut = limiter.done(raw, clean)  # said enough: stop at this sentence
 
         try:
             for token in self._ollama.stream_chat(s.get("model"), messages, cancel, s.get("temperature")):
@@ -225,11 +230,10 @@ class Api:
                     if not visible:
                         continue
                 full += visible
-                if speak:
-                    queue_sentences(chunker.feed(visible))
-                else:
-                    self._emit("token", {"id": gen, "t": visible})
-            if speak and gen == self._gen:
+                queue_sentences(chunker.feed(visible))
+                if cut:
+                    break  # closes the stream, so Ollama stops generating too
+            if gen == self._gen and not cut:
                 tail = chunker.flush()
                 if quoted and tail:
                     tail[-1] = tail[-1].rstrip().rstrip('"”')
@@ -239,7 +243,7 @@ class Api:
             if gen == self._gen:
                 self._emit("error", f"Ollama error: {e}")
         finally:
-            reply = full.strip()
+            reply = said.strip()
             if quoted:
                 reply = reply.rstrip('"”').rstrip()
             if reply:

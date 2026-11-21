@@ -91,7 +91,8 @@ class OllamaClient:
             "stream": True,
             "think": False,
             "keep_alive": "30m",
-            "options": self._options(model, temperature=temperature),
+            # num_predict is a last-resort token cap (ReplyLimiter normally stops it far sooner)
+            "options": self._options(model, temperature=temperature, num_predict=1024),
         }
         yield from self._chat(body, cancel)
 

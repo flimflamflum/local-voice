@@ -104,6 +104,35 @@ class SentenceChunker:
         return [rest] if rest.strip() else []
 
 
+_DETAIL_ASKED = re.compile(
+    r"\b(detail|detailed|details|elaborate|in depth|in-depth|step by step|steps|story|long|longer|"
+    r"tell me more|explain|everything|list|recipe|instructions|write me|write a)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_END = re.compile(r"[.!?…][\"')\]]*\s*$")
+
+
+class ReplyLimiter:
+    """Backstop for chatty models: ends a reply at a sentence boundary once it has said enough.
+
+    The prompt already asks for short answers; this catches models that ignore it (and the
+    Normal personality, which has no prompt). Counted in spoken characters (~16 per second of
+    speech), so code shown on screen doesn't count.
+    """
+
+    SHORT = 320  # ~20 s of speech
+    DETAILED = 1100  # ~70 s, when the user asked for detail / a story / steps
+
+    def __init__(self, user_text: str):
+        self.limit = self.DETAILED if _DETAIL_ASKED.search(user_text or "") else self.SHORT
+        self.spoken = 0
+
+    def done(self, raw: str, clean: str) -> bool:
+        """Feed each chunk as it's spoken; True = stop the reply after this one."""
+        self.spoken += len(clean)
+        return self.spoken >= self.limit and (raw.endswith("\n") or bool(_SENTENCE_END.search(raw)))
+
+
 class ThinkFilter:
     """Removes <think>...</think> sections from a token stream (reasoning models)."""
 

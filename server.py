@@ -41,7 +41,7 @@ from src.llm import OllamaClient  # noqa: E402
 from src.prompt import DEFAULT_STYLE, build_system_prompt, style_options  # noqa: E402
 from src.settings import Settings  # noqa: E402
 from src.stt import Transcriber, is_real_speech  # noqa: E402
-from src.textutil import SentenceChunker, ThinkFilter, clean_for_speech  # noqa: E402
+from src.textutil import ReplyLimiter, SentenceChunker, ThinkFilter, clean_for_speech  # noqa: E402
 from src.tts import OUT_RATE, Synthesizer, get_kokoro, to_pcm16  # noqa: E402
 
 from src.link import load_config, local_addresses  # noqa: E402
@@ -226,17 +226,21 @@ class Conversation:
         """LLM thread: stream tokens, cut them into speakable chunks, queue synthesis."""
         put = lambda item: self.loop.call_soon_threadsafe(q.put_nowait, item)  # noqa: E731
         think, chunker = ThinkFilter(), SentenceChunker()
-        full, quoted = "", False
+        limiter = ReplyLimiter(messages[-1]["content"])
+        full, said, quoted, cut = "", "", False, False
 
         def emit(raws):
+            nonlocal said, cut
             for raw in raws:
-                if turn != self.turn:
+                if turn != self.turn or cut:
                     return
                 clean = clean_for_speech(raw)
                 fut = None
                 if s.get("server_voice", True) and clean:
                     fut = SYNTH_POOL.submit(self._synth, turn, clean, s.get("voice"), s.get("rate", 0))
                 put((raw, fut))
+                said += raw
+                cut = limiter.done(raw, clean)  # said enough: stop at this sentence
 
         try:
             for token in OLLAMA.stream_chat(s["model"], messages, cancel, SETTINGS.get("temperature")):
@@ -251,15 +255,18 @@ class Conversation:
                         continue
                 full += visible
                 emit(chunker.feed(visible))
-            tail = chunker.flush()
-            if quoted and tail:
-                tail[-1] = tail[-1].rstrip().rstrip('"”')
-            emit(tail)
+                if cut:
+                    break  # closes the stream, so Ollama stops generating too
+            if not cut:
+                tail = chunker.flush()
+                if quoted and tail:
+                    tail[-1] = tail[-1].rstrip().rstrip('"”')
+                emit(tail)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             put(e)
         finally:
-            reply = full.strip()
+            reply = said.strip()
             if quoted:
                 reply = reply.rstrip('"”').rstrip()
             if reply:
