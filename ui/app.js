@@ -238,10 +238,57 @@ document.addEventListener("keydown", (e) => {
 // --------------------------------------------------------------- settings
 function openDrawer() {
   body.classList.add("drawer-open");
+  refreshPhone();
+  clearInterval(phone.timer);
+  phone.timer = setInterval(refreshPhone, 2000);
 }
 function closeDrawer() {
   body.classList.remove("drawer-open");
+  clearInterval(phone.timer);
 }
+
+// --------------------------------------------------------------- phone link (QR)
+const phone = { host: null, timer: null, qr: "", startedAt: 0 };
+
+async function refreshPhone() {
+  if (!api) return;
+  const p = await api.phone_link(phone.host);
+  phone.host = p.host;
+
+  const sel = $("hostSelect");
+  const key = p.addresses.map((a) => a[0]).join();
+  if (sel.dataset.key !== key) {
+    const labels = Object.fromEntries(p.addresses);
+    fillSelect(sel, p.addresses.map((a) => a[0]), p.host, (ip) => `${ip}  ·  ${labels[ip]}`);
+    sel.dataset.key = key;
+  }
+  sel.value = p.host;
+
+  const qr = p.qr || '<span class="qr-empty">No network connection</span>';
+  if (qr !== phone.qr) $("qrBox").innerHTML = phone.qr = qr;
+
+  const starting = !p.running && Date.now() - phone.startedAt < 90000;
+  $("serverStatus").classList.toggle("on", p.running);
+  $("serverStatus").classList.toggle("starting", starting);
+  $("serverStatusText").textContent = p.running
+    ? `Phone server running on port ${p.port}`
+    : starting
+      ? "Starting… loading speech + voice models"
+      : "Phone server isn't running, so the app can't connect yet";
+  $("startServer").hidden = p.running || starting;
+}
+
+$("hostSelect").addEventListener("change", (e) => {
+  phone.host = e.target.value;
+  refreshPhone();
+});
+$("startServer").addEventListener("click", async () => {
+  const err = await api?.start_phone_server();
+  if (err) return toast(err, 6000);
+  phone.startedAt = Date.now();
+  toast("Starting the phone server in the background");
+  refreshPhone();
+});
 $("settingsBtn").addEventListener("click", openDrawer);
 $("closeDrawer").addEventListener("click", closeDrawer);
 $("scrim").addEventListener("click", closeDrawer);

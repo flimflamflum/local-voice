@@ -27,10 +27,8 @@ import concurrent.futures
 import json
 import os
 import secrets
-import socket
 import threading
 import traceback
-from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -46,28 +44,11 @@ from src.stt import Transcriber, is_real_speech  # noqa: E402
 from src.textutil import SentenceChunker, ThinkFilter, clean_for_speech  # noqa: E402
 from src.tts import OUT_RATE, Synthesizer, get_kokoro, to_pcm16  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "server_config.json"
+from src.link import load_config, local_addresses  # noqa: E402
+
 IN_RATE = 16000
 MAX_HISTORY = 24
 MAX_UTTERANCE_BYTES = IN_RATE * 2 * 60  # 60 s of speech
-
-
-def load_config():
-    cfg = {}
-    if CONFIG_PATH.exists():
-        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
-    changed = False
-    if not cfg.get("token"):
-        cfg["token"] = secrets.token_urlsafe(12)  # 16 chars
-        changed = True
-    if not cfg.get("port"):
-        cfg["port"] = 8765
-        changed = True
-    if changed:
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    return cfg
-
 
 CONFIG = load_config()
 SETTINGS = Settings()  # desktop settings provide the defaults
@@ -344,26 +325,16 @@ async def ws_endpoint(ws: WebSocket):
         print(f"[-] phone disconnected ({peer})")
 
 
-def local_addresses():
-    ips = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
-    except OSError:
-        pass
-    return sorted(ip for ip in ips if not ip.startswith("127."))
-
-
 def main():
     SYNTH_POOL.submit(lambda: None)  # start the TTS thread (loads voices + Kokoro)
     port = CONFIG["port"]
     print("\n  Jarvis phone server")
     print("  -------------------")
-    for ip in local_addresses():
-        tag = "  <- Tailscale (works from anywhere)" if ip.startswith("100.") else "  (home Wi-Fi only)"
-        print(f"  Address: {ip}:{port}{tag}")
+    for ip, label in local_addresses():
+        print(f"  Address: {ip}:{port}   ({label})")
     print(f"  Token:   {CONFIG['token']}")
-    print("\n  Enter the address and token in the Jarvis app's settings.")
+    print("\n  Easiest: open the desktop app > Settings > Phone and scan the QR code with the")
+    print("  Jarvis Android app. Or type the address and token into the app's settings.")
     print("  Audio from the phone is never played on this PC.\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning", ws_ping_interval=20, ws_ping_timeout=20)
 

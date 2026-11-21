@@ -60,17 +60,16 @@ Each personality is a short tone prompt placed at the start of the system prompt
 ## Talk to Jarvis from your phone (Android)
 Your PC does all the work: Whisper, the LLM and the Kokoro voice. The phone only records your voice and plays back the reply. The app is about 2 MB and needs no models.
 
-**1. Start the server on the PC**
-```powershell
-.\run-server.bat
-```
-It prints the PC's address(es) and a secret token, which is saved in `server_config.json`. The first time, Windows Firewall asks whether to allow Python. Allow it on **private** networks. You can run the desktop app and the server at the same time.
+**1. Build the app.** Open the `android/` folder in Android Studio, let Gradle sync, then use **Run** (phone plugged in with USB debugging on) or **Build → Generate App Bundles or APKs → Build APK(s)**.
 
-**2. Build the app.** Open the `android/` folder in Android Studio, let Gradle sync, then use **Run** (phone plugged in with USB debugging on) or **Build → Generate App Bundles or APKs → Build APK(s)**.
+**2. Link the phone.** In the desktop app, open **Settings → Phone**:
+- Click **Start phone server** if it isn't running yet. It runs in the background and logs to `server.log`. Instead, you can run `.\run-server.bat` to see it in a console window.
+- The first time, Windows Firewall asks whether to allow Python. Allow it on **private** networks.
+- Pick the address to put in the QR code:
+  - **At home:** your Wi-Fi address, e.g. `192.168.1.20`.
+  - **From anywhere:** install [Tailscale](https://tailscale.com/) (free) on both the PC and the phone, sign in with the same account, and pick the PC's `100.x.y.z` address. Your PC isn't exposed to the internet, and Tailscale encrypts the connection.
 
-**3. Connect.** In the app's settings, enter the address and token that the server printed.
-- **At home:** use the PC's Wi-Fi address, e.g. `192.168.1.20`.
-- **From anywhere:** install [Tailscale](https://tailscale.com/) (free) on both the PC and the phone, sign in with the same account, and use the PC's `100.x.y.z` address. Your PC isn't exposed to the internet, and Tailscale encrypts the connection.
+Then, in the Android app, tap **Settings → Scan QR code** and point the phone at the screen. That's it. Scanning with the phone's normal camera app works too. You can also type the address and token by hand: the token is in `server_config.json`.
 
 **In the app**
 - Tap the orb to talk. It stops listening when you go quiet, or tap again to send right away.

@@ -13,6 +13,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 import webview  # noqa: E402
 
+from src import link
 from src.llm import OllamaClient
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
@@ -123,6 +124,29 @@ class Api:
             return self._ollama.list_models()
         except Exception:  # noqa: BLE001
             return []
+
+    def phone_link(self, host=None):
+        """QR code + status for linking the Android app (Settings > Phone)."""
+        cfg = link.load_config()
+        addresses = link.local_addresses()
+        ips = [ip for ip, _ in addresses]
+        if host not in ips:
+            host = ips[0] if ips else ""
+        return {
+            "addresses": addresses,
+            "host": host,
+            "port": cfg["port"],
+            "qr": link.qr_svg(link.link_url(host, cfg["port"], cfg["token"])) if host else "",
+            "running": link.server_running(cfg["port"]),
+        }
+
+    def start_phone_server(self):
+        try:
+            if not link.server_running(link.load_config()["port"]):
+                link.start_server()
+            return None
+        except Exception as e:  # noqa: BLE001
+            return f"Couldn't start the phone server: {e}"
 
     def test_voice(self):
         self._interrupt()

@@ -21,6 +21,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -35,7 +36,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.height
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +76,29 @@ fun SettingsScreen(vm: JarvisViewModel) {
 
             // ------------------------------------------------------------ connection
             SectionTitle("Your PC")
+            val context = LocalContext.current
+            Button(
+                onClick = {
+                    val options = GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                        .enableAutoZoom()
+                        .build()
+                    GmsBarcodeScanning.getClient(context, options).startScan()
+                        .addOnSuccessListener { code -> vm.applyLink(code.rawValue ?: "") }
+                        .addOnFailureListener { e -> vm.scanFailed("Scanner unavailable: ${e.message ?: "unknown error"}") }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+            ) { Text("Scan QR code", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
+            Gap(6)
+            Text(
+                "On your PC: Jarvis desktop app → Settings → Phone. Or type it in:",
+                color = Faint, fontSize = 12.sp, lineHeight = 17.sp,
+            )
+            Gap(10)
             var server by remember(p.server) { mutableStateOf(p.server) }
             var token by remember(p.token) { mutableStateOf(p.token) }
             OutlinedTextField(
@@ -88,10 +117,10 @@ fun SettingsScreen(vm: JarvisViewModel) {
             )
             Gap(10)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(
+                OutlinedButton(
                     onClick = { vm.saveConnection(server, token) },
                     enabled = server.isNotBlank() && token.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Accent),
                 ) { Text("Connect") }
                 val color = when (vm.phase) {
                     Phase.Offline -> Bad
@@ -102,8 +131,9 @@ fun SettingsScreen(vm: JarvisViewModel) {
             }
             Gap(8)
             Text(
-                "On your PC, run run-server.bat. It shows the address and token to type here. " +
-                    "Use the Tailscale address (starts with 100.) to talk to Jarvis from anywhere.",
+                "The phone server has to be running on your PC: start it from the desktop app's " +
+                    "Phone settings, or run run-server.bat. Pick the Tailscale address (starts with 100.) " +
+                    "to talk to Jarvis from anywhere.",
                 color = Faint, fontSize = 12.sp, lineHeight = 17.sp,
             )
 

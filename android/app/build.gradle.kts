@@ -50,4 +50,6 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Google's QR scanner UI (runs inside Play services: no camera permission, ~no APK size)
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }

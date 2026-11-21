@@ -124,6 +124,20 @@
       </select>
     </div>
 
+    <div class="section-title">Phone</div>
+    <div class="phone-link">
+      <div class="qr" id="qrBox"></div>
+      <p class="phone-hint">In the Jarvis Android app, tap <b>Scan QR code</b> in Settings.</p>
+      <div class="field">
+        <label for="hostSelect">Address in the code</label>
+        <select id="hostSelect"></select>
+      </div>
+      <div class="server-status" id="serverStatus">
+        <span class="dot"></span><span id="serverStatusText">Checking…</span>
+      </div>
+      <button class="ghost-btn" id="startServer" hidden>Start phone server</button>
+    </div>
+
     <div class="drawer-foot">
       <kbd>Space</kbd> talk / stop talking &nbsp;·&nbsp; <kbd>Esc</kbd> shut up &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>N</kbd> new chat
     </div>

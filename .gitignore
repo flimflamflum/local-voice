@@ -10,6 +10,7 @@ models/
 settings.json
 # Phone server secret token
 server_config.json
+server.log
 
 # Android build output / machine-specific files
 android/.gradle/

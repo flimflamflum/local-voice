@@ -22,6 +22,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             JarvisTheme { JarvisApp(vm) }
         }
+        // Opened from a scanned jarvis://link QR code (camera app)?
+        if (savedInstanceState == null) intent?.data?.let { vm.applyLink(it.toString()) }
+        addOnNewIntentListener { i -> i.data?.let { vm.applyLink(it.toString()) } }
     }
 
     override fun onStop() {

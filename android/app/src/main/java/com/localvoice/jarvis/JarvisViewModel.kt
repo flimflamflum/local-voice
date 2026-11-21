@@ -3,6 +3,7 @@ package com.localvoice.jarvis
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -70,9 +71,16 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private var target = ""  // everything that's been "spoken" so far
     private var revealJob: Job? = null
 
+    private var loaded = false
+    private var pendingLink: String? = null
+
     init {
         viewModelScope.launch {
             setPrefs(store.load(), save = false)
+            loaded = true
+            val link = pendingLink
+            pendingLink = null
+            if (link != null && applyLink(link)) return@launch
             if (prefs.configured) connect() else {
                 status = "Add your PC's address and token"
                 showSettings = true
@@ -122,6 +130,36 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     fun saveConnection(server: String, token: String) {
         setPrefs(prefs.copy(server = server.trim(), token = token.trim()))
         if (prefs.configured) connect()
+    }
+
+    /** The desktop app's QR code: jarvis://link?host=1.2.3.4&port=8765&token=... */
+    fun applyLink(raw: String): Boolean {
+        if (!loaded) {
+            pendingLink = raw
+            return true
+        }
+        val parsed = try {
+            val uri = Uri.parse(raw.trim())
+            if (uri.scheme == "jarvis") {
+                val host = uri.getQueryParameter("host")
+                val token = uri.getQueryParameter("token")
+                val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 8765
+                if (!host.isNullOrBlank() && !token.isNullOrBlank()) "$host:$port" to token else null
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+        if (parsed == null) {
+            status = "That QR code isn't a Jarvis link"
+            return false
+        }
+        showSettings = false
+        saveConnection(parsed.first, parsed.second)
+        return true
+    }
+
+    fun scanFailed(message: String) {
+        status = message
     }
 
     fun updatePrefs(change: (Prefs) -> Prefs) {
