@@ -39,7 +39,7 @@ The settings (gear icon) cover:
 - the model
 - the voice (14 Kokoro voices plus the Windows ones), speed and volume
 - your name
-- the personality: Playful, Chill, Professional, Sarcastic, Butler, Hype or Pirate
+- the personality: Normal, Playful, Chill, Professional, Sarcastic, Butler, Hype or Pirate
 - hands-free mode, which keeps listening after each reply
 - the Whisper model size
 

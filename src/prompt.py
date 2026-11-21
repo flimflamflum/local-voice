@@ -8,6 +8,12 @@ from datetime import datetime
 
 # id -> (label shown in settings, tone prompt placed at the very start of the chat)
 STYLES = {
+    "normal": (
+        "Normal",
+        "Your style: plain and straight to the point. Answer exactly what was asked and then stop. No "
+        "greetings, no jokes, no filler, no compliments on the question, and never end with a follow-up "
+        "question or an offer of more help like \"anything else I can help with?\".",
+    ),
     "playful": (
         "Playful",
         "Your style: upbeat, quick-witted, a little cheeky and warm, like a clever friend who happens to know "
