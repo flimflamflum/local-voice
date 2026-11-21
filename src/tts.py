@@ -41,8 +41,10 @@ KOKORO_VOICE_LABELS = {
 
 SAFT_22K_16BIT_MONO = 22
 OUT_RATE = 24000        # Kokoro's native rate; SAPI audio gets resampled to it
-SENTENCE_PAUSE = 0.12   # seconds of breath between sentences
-OUTPUT_TAIL = 0.15      # wait after the buffer empties before closing the device
+SENTENCE_PAUSE = 0.12   # seconds of breath after a sentence
+CLAUSE_PAUSE = 0.05     # shorter pause when a chunk ends mid-sentence (at a comma etc.)
+OUTPUT_TAIL = 0.05      # extra wait (on top of device latency) before reporting "done speaking"
+STREAM_IDLE_CLOSE = 30  # seconds of silence before the audio device is released
 
 
 def kokoro_available() -> bool:
@@ -196,7 +198,9 @@ class Speaker:
                 except Exception as e:  # noqa: BLE001
                     print("TTS synth error:", e)  # still pass on_play through so the text shows
             if epoch == self._epoch:
-                self._audio_q.put((epoch, audio, sr, on_play))
+                ends_sentence = text.rstrip().rstrip("\"')]")[-1:] in (".", "!", "?", "…", "")
+                pause = SENTENCE_PAUSE if ends_sentence else CLAUSE_PAUSE
+                self._audio_q.put((epoch, audio, sr, (on_play, pause)))
 
     # ------------------------------------------------------------ playback
     # One output stream stays open for a whole reply and is fed sentence after
@@ -238,7 +242,8 @@ class Speaker:
     def _open_stream(self):
         if self._stream is None:
             self._stream = sd.OutputStream(
-                samplerate=OUT_RATE, channels=1, dtype="float32", callback=self._callback
+                samplerate=OUT_RATE, channels=1, dtype="float32", callback=self._callback,
+                latency="low",  # ~90 ms instead of ~180 ms before sound reaches the speakers
             )
             self._stream.start()
             self._latency = float(self._stream.latency or 0.1)
@@ -265,22 +270,32 @@ class Speaker:
             self._stream = None
 
     def _play_loop(self):
+        last_active = time.monotonic()
         while True:
-            epoch, audio, sr, on_play = self._audio_q.get()
+            try:
+                epoch, audio, sr, extra = self._audio_q.get(timeout=5)
+            except queue.Empty:
+                # The stream stays open between replies (re-opening costs ~100-150 ms);
+                # release the audio device after a while of silence.
+                if self._stream is not None and not self.busy and time.monotonic() - last_active > STREAM_IDLE_CLOSE:
+                    self._close_stream()
+                continue
+            last_active = time.monotonic()
             if epoch != self._epoch:
                 continue
+            on_play, pause = extra or (None, SENTENCE_PAUSE)
             if audio is None:  # end of reply (or stop): let the buffer drain, then go idle
                 while self._buffered() and epoch == self._epoch:
                     sd.sleep(20)
                 if epoch == self._epoch:
-                    sd.sleep(int(1000 * OUTPUT_TAIL))  # let the device play out its last block
-                    self._close_stream()
+                    sd.sleep(int(1000 * (self._latency + OUTPUT_TAIL)))  # device plays out its last block
                     if self.busy:
                         self.busy = False
                         self._on_idle()
+                last_active = time.monotonic()
                 continue
             audible = len(audio) > 0
-            audio, duration = _prepare(audio, sr) if audible else (audio, 0.0)
+            audio, duration = _prepare(audio, sr, pause) if audible else (audio, 0.0)
             try:
                 self._open_stream()
             except Exception as e:  # noqa: BLE001
@@ -297,7 +312,7 @@ class Speaker:
                 self._on_start()
 
 
-def _prepare(audio, sr):
+def _prepare(audio, sr, pause=SENTENCE_PAUSE):
     """Resample to the output rate, trim the engine's built-in silence, add a natural pause.
     Returns (audio, seconds_of_actual_speech)."""
     if sr != OUT_RATE:
@@ -309,4 +324,4 @@ def _prepare(audio, sr):
         pad = int(0.02 * OUT_RATE)  # keep 20 ms so soft consonants aren't clipped
         audio = audio[max(0, loud[0] - pad): loud[-1] + pad]
     duration = len(audio) / OUT_RATE
-    return np.concatenate([audio, np.zeros(int(SENTENCE_PAUSE * OUT_RATE), np.float32)]), duration
+    return np.concatenate([audio, np.zeros(int(pause * OUT_RATE), np.float32)]), duration

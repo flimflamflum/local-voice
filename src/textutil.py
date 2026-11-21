@@ -37,7 +37,7 @@ class SentenceChunker:
     def __init__(self, min_len: int = 12):
         self.buf = ""
         self.min_len = min_len
-        self.first = True
+        self.n = 0  # chunks emitted so far
 
     def _next_boundary(self, start=0):
         """First sentence boundary that isn't inside a ``` code block."""
@@ -50,21 +50,23 @@ class SentenceChunker:
                 return m
             pos = m.end()
 
-    # Long run-on sentence? Break at a clause (", " "; " ": " " - ") so speech can start sooner.
+    # Break at a clause (", " "; " ": " " - ") instead of waiting for the sentence to end.
+    # TTS time grows with chunk length (~150 ms + 15 ms/char on CPU Kokoro) while audio
+    # lasts ~60 ms/char, so: a tiny first chunk gets the voice going fast, a short second
+    # chunk is ready before the first finishes playing, and after that chunks can be long.
     _CLAUSE = re.compile(r"[,;:]\s+|\s+[—–-]\s+")
-    CLAUSE_SPLIT_AT = 110  # chars without a sentence end before we split at a clause
-    MIN_CLAUSE = 35
+    #            (split once buffer reaches, min clause length, take earliest clause?)
+    _CLAUSE_RULES = [(24, 8, True), (70, 20, True), (110, 35, False)]
 
     def _clause_split(self):
-        # The very first chunk splits eagerly: getting the voice started fast matters most.
-        split_at, min_clause = (45, 20) if self.first else (self.CLAUSE_SPLIT_AT, self.MIN_CLAUSE)
+        split_at, min_clause, earliest = self._CLAUSE_RULES[min(self.n, 2)]
         if len(self.buf) < split_at or self.buf.count("```") % 2 == 1:
             return None
         found = None
         for m in self._CLAUSE.finditer(self.buf):
             if m.start() >= min_clause:
                 found = m
-                if self.first:
+                if earliest:
                     break
         return found.end() if found else None
 
@@ -78,12 +80,13 @@ class SentenceChunker:
                 if cut:
                     out.append(self.buf[:cut])
                     self.buf = self.buf[cut:]
-                    self.first = False
+                    self.n += 1
                     continue
                 break
             end = m.end()
             candidate = self.buf[:end]
-            if len(candidate.strip()) < self.min_len and "\n" not in m.group(0):
+            min_len = 6 if self.n == 0 else self.min_len  # "Sure!" can go out on its own first
+            if len(candidate.strip()) < min_len and "\n" not in m.group(0):
                 # Too short ("Ok." / "Mr.") - merge with the next sentence.
                 nxt = self._next_boundary(end)
                 if not nxt:
@@ -93,7 +96,7 @@ class SentenceChunker:
             self.buf = self.buf[end:]
             if candidate.strip():
                 out.append(candidate)  # raw (keeps newlines) - strip/clean before speaking
-                self.first = False
+                self.n += 1
         return out
 
     def flush(self):
