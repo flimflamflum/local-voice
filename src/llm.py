@@ -1,6 +1,7 @@
 """Streaming chat against the local Ollama HTTP API."""
 import json
 import threading
+import time
 
 import requests
 
@@ -11,6 +12,17 @@ NUM_CTX = 4096  # small context keeps more of the model on your 4 GB GPU
 # at most this big get every layer forced onto the GPU; if that ever fails to load
 # (e.g. another app is using VRAM) we fall back to Ollama's own split for that model.
 FULL_GPU_MAX_BYTES = 3_600_000_000
+
+# Thinking budget. Small models can reason for thousands of tokens; left alone they use up
+# the whole token allowance (and the 4096-token context) and never get to the answer.
+# Past either limit we stop the reasoning and have the model answer from its notes so far.
+THINK_MAX_TOKENS = 2000   # ~24 s on a 2B model, ~45 s on a 4B; leaves context for the answer
+THINK_MAX_SECONDS = 45    # big models that spill onto the CPU think far slower
+NOTES_MAX_CHARS = 6000    # how much of the cut-off reasoning to hand back (the end matters most)
+
+
+class _ThinkingTooLong(Exception):
+    pass
 
 
 class OllamaClient:
@@ -106,7 +118,52 @@ class OllamaClient:
             # sooner). Thinking tokens count toward it too, so give a thinking model more room.
             "options": self._options(model, temperature=temperature, num_predict=3072 if think else 1024),
         }
-        yield from self._chat(body, cancel, on_thinking)
+        if not think:
+            yield from self._chat(body, cancel, on_thinking)
+            return
+
+        notes, start = [], time.monotonic()
+        on_thinking = on_thinking or (lambda _t: None)
+
+        def collect(text):
+            notes.append(text)
+            on_thinking(text)
+            if len(notes) >= THINK_MAX_TOKENS or time.monotonic() - start > THINK_MAX_SECONDS:
+                raise _ThinkingTooLong  # closes the request, so Ollama stops generating
+
+        answered = False
+        try:
+            for token in self._chat(body, cancel, collect):
+                answered = True
+                yield token
+        except _ThinkingTooLong:
+            pass
+        if answered or cancel.is_set() or not notes:
+            return
+        # It thought too long (or ran out of tokens mid-thought): answer from the notes.
+        on_thinking("\n\n[Thought for too long, so it answered from these notes.]")
+        yield from self._answer_from_notes(model, messages, "".join(notes), cancel, temperature)
+
+    def _answer_from_notes(self, model, messages, notes, cancel, temperature):
+        notes = notes.strip()
+        if len(notes) > NOTES_MAX_CHARS:
+            notes = "..." + notes[-NOTES_MAX_CHARS:]
+        last = messages[-1]
+        nudge = (
+            f"{last['content']}\n\n"
+            f"[Your private reasoning about this so far, cut short:]\n{notes}\n\n"
+            "[Stop reasoning now. Reply to the message above with your final answer, "
+            "without mentioning these notes.]"
+        )
+        body = {
+            "model": model,
+            "messages": messages[:-1] + [{"role": last["role"], "content": nudge}],
+            "stream": True,
+            "think": False,
+            "keep_alive": "30m",
+            "options": self._options(model, temperature=temperature, num_predict=1024),
+        }
+        yield from self._chat(body, cancel)
 
     def _chat(self, body, cancel, on_thinking=None):
         retry = False
