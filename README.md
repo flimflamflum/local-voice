@@ -35,7 +35,15 @@ Double-click **`Jarvis.bat`** or the desktop shortcut.
 | `Esc` / stop button | Shut it up |
 | `Ctrl+N` | New chat (clears memory) |
 
-The settings (gear icon) cover the model, voice (14 Kokoro voices plus the Windows ones), speed, volume, your name, hands-free mode (keeps listening after each reply), and the Whisper model size.
+The settings (gear icon) cover:
+- the model
+- the voice (14 Kokoro voices plus the Windows ones), speed and volume
+- your name
+- the personality: Playful, Chill, Professional, Sarcastic, Butler, Hype or Pirate
+- hands-free mode, which keeps listening after each reply
+- the Whisper model size
+
+Each personality is a short tone prompt placed at the start of the system prompt. Add your own in `STYLES` in `src/prompt.py`.
 
 ## How it works
 | File | What it does |

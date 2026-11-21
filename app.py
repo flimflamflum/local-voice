@@ -14,7 +14,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 import webview  # noqa: E402
 
 from src.llm import OllamaClient
-from src.prompt import build_system_prompt
+from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber
 from src.textutil import SentenceChunker, ThinkFilter, clean_for_speech
@@ -69,6 +69,7 @@ class Api:
             "settings": self._settings.all(),
             "models": models,
             "voices": self._speaker.voices,
+            "styles": style_options(),
             "whisper_ready": self._transcriber.ready.is_set() and self._transcriber.model is not None,
             "error": err,
         }
@@ -164,7 +165,7 @@ class Api:
         self._history[:] = self._history[-MAX_HISTORY:]
         s = self._settings
         messages = [
-            {"role": "system", "content": build_system_prompt(s.get("assistant_name"), s.get("user_name"))}
+            {"role": "system", "content": build_system_prompt(s.get("assistant_name"), s.get("user_name"), s.get("style"))}
         ] + self._history
 
         self._set_state("thinking")

@@ -268,6 +268,10 @@ function bindSettings() {
     toast(`Switched to ${prettyModel(e.target.value)}`);
   });
   $("voiceSelect").addEventListener("change", (e) => save({ voice: e.target.value }));
+  $("styleSelect").addEventListener("change", (e) => {
+    save({ style: e.target.value });
+    toast(`Personality: ${e.target.selectedOptions[0].textContent}`);
+  });
   $("rate").addEventListener("input", (e) => {
     $("rateVal").textContent = fmtSigned(e.target.value);
   });
@@ -294,8 +298,10 @@ function fmtSigned(v) {
   return v > 0 ? `+${v}` : `${v}`;
 }
 
-function applySettings(s, models, voices) {
+function applySettings(s, models, voices, styles) {
   settings = s;
+  const styleLabels = Object.fromEntries(styles);
+  fillSelect($("styleSelect"), styles.map((x) => x[0]), s.style, (id) => styleLabels[id]);
   fillSelect($("modelSelect"), models.length ? models : [""], s.model, (m) => prettyModel(m) || "No models found");
   const voiceLabels = Object.fromEntries(voices);
   fillSelect($("voiceSelect"), voices.map((v) => v[0]), s.voice, (id) => voiceLabels[id]);
@@ -315,7 +321,7 @@ async function boot() {
   api = window.pywebview.api;
   bindSettings();
   const info = await api.init();
-  applySettings(info.settings, info.models, info.voices);
+  applySettings(info.settings, info.models, info.voices, info.styles);
   $("whisperStatus").textContent = info.whisper_ready ? "ready" : "loading…";
   if (info.error) addMessage("bot error", info.error, "System");
   handlers.state("idle");
