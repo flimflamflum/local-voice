@@ -1,0 +1,10 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded by setup.ps1 (too big for git)
+models/
+
+# Per-user preferences (created on first run)
+settings.json

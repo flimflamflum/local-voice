@@ -1,0 +1,7 @@
+pywebview>=6.0
+faster-whisper>=1.2
+sounddevice>=0.5
+numpy
+pywin32
+requests
+kokoro-onnx>=0.4

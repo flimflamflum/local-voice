@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jarvis</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-state="idle">
+  <div class="bg-glow"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name" id="brandName">JARVIS</span>
+      <span class="brand-sub">local voice</span>
+    </div>
+    <div class="top-actions">
+      <label class="pill select-pill" title="Model">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3 6.7 3.7L12 11.7 5.3 8 12 4.3ZM5 9.7l6 3.3v6.6l-6-3.3V9.7Zm8 9.9V13l6-3.3v6.6l-6 3.3Z"/></svg>
+        <select id="modelSelect"></select>
+      </label>
+      <button class="icon-btn" id="newChatBtn" title="New chat">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M12 5v14M5 12h14" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn" id="settingsBtn" title="Settings">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" transform="translate(-1 0)"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="orb-panel">
+      <div class="orb-wrap">
+        <canvas id="orb"></canvas>
+      </div>
+      <div class="status">
+        <span class="status-label" id="statusLabel">Ready</span>
+        <span class="status-hint" id="statusHint">Press <kbd>Space</kbd> or tap the mic to talk</span>
+      </div>
+    </section>
+
+    <section class="chat-panel">
+      <div class="chat" id="chat">
+        <div class="empty" id="emptyState">
+          <div class="empty-title">Say something.</div>
+          <div class="empty-sub">Try “What should I cook tonight?” or “Explain black holes like I'm five.”</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="composer">
+    <button class="stop-btn" id="stopBtn" title="Stop (Esc)">
+      <svg viewBox="0 0 24 24" class="ico"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+    </button>
+    <form class="input-wrap" id="textForm" autocomplete="off">
+      <input id="textInput" placeholder="…or type a message" />
+      <button type="submit" class="send-btn" title="Send">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+      </button>
+    </form>
+    <button class="mic-btn" id="micBtn" title="Talk (Space)">
+      <span class="mic-ring"></span>
+      <svg viewBox="0 0 24 24" class="ico"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 1 0-7 0v5A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.9V20H8.5a1 1 0 1 0 0 2h7a1 1 0 1 0 0-2H13v-2.6a6 6 0 0 0 5-5.9Z"/></svg>
+    </button>
+  </footer>
+
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" id="closeDrawer" title="Close">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+
+    <div class="field">
+      <label for="userName">Your name</label>
+      <input id="userName" placeholder="So Jarvis knows who's boss" />
+    </div>
+    <div class="field">
+      <label for="assistantName">Assistant name</label>
+      <input id="assistantName" placeholder="Jarvis" />
+    </div>
+
+    <div class="section-title">Voice</div>
+    <div class="field">
+      <label for="voiceSelect">Voice</label>
+      <select id="voiceSelect"></select>
+    </div>
+    <div class="field">
+      <label for="rate">Speed <span class="val" id="rateVal"></span></label>
+      <input type="range" id="rate" min="-5" max="6" step="1" />
+    </div>
+    <div class="field">
+      <label for="volume">Volume <span class="val" id="volumeVal"></span></label>
+      <input type="range" id="volume" min="0" max="100" step="5" />
+    </div>
+    <button class="ghost-btn" id="testVoice">Test voice</button>
+
+    <div class="section-title">Behaviour</div>
+    <label class="toggle">
+      <input type="checkbox" id="speakReplies" />
+      <span class="track"><span class="thumb"></span></span>
+      <span class="toggle-text">Speak replies out loud</span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="handsFree" />
+      <span class="track"><span class="thumb"></span></span>
+      <span class="toggle-text">Hands-free mode<small>Starts listening again after each reply</small></span>
+    </label>
+
+    <div class="section-title">Speech recognition</div>
+    <div class="field">
+      <label for="whisperSelect">Whisper model <span class="val" id="whisperStatus"></span></label>
+      <select id="whisperSelect">
+        <option value="tiny.en">tiny.en — fastest</option>
+        <option value="base.en">base.en — balanced</option>
+        <option value="small.en">small.en — most accurate</option>
+      </select>
+    </div>
+
+    <div class="drawer-foot">
+      <kbd>Space</kbd> talk / stop talking &nbsp;·&nbsp; <kbd>Esc</kbd> shut up &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>N</kbd> new chat
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
