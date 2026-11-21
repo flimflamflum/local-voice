@@ -8,3 +8,14 @@ models/
 
 # Per-user preferences (created on first run)
 settings.json
+# Phone server secret token
+server_config.json
+
+# Android build output / machine-specific files
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/.kotlin/
+*.apk

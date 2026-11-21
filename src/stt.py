@@ -8,6 +8,13 @@ import sounddevice as sd
 SAMPLE_RATE = 16000
 BLOCK = 512  # 32 ms
 
+# Whisper likes to "hear" these in silence or noise.
+_HALLUCINATIONS = {"", "you", "thank you.", "thanks for watching!", "thank you for watching.", "bye.", "."}
+
+
+def is_real_speech(text: str) -> bool:
+    return text.strip().lower() not in _HALLUCINATIONS and any(c.isalnum() for c in text)
+
 
 class Transcriber:
     def __init__(self, model_name: str):

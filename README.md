@@ -54,6 +54,33 @@ Each personality is a short tone prompt placed at the start of the system prompt
 | `src/tts.py` | **Kokoro** (neural, ONNX) or Windows SAPI voices. Synthesis runs ahead of playback, and everything plays through one continuous audio stream so there are no gaps between sentences |
 | `src/prompt.py` | The personality and voice-friendly rules. Edit it to change how Jarvis talks |
 | `ui/` | The interface (HTML/CSS/JS in a pywebview window) |
+| `server.py` | The phone server. It does the same speech-to-text, Ollama and Kokoro work, then streams the text and audio to the Android app. It never plays sound on the PC |
+| `android/` | The Android app (Kotlin + Jetpack Compose) |
+
+## Talk to Jarvis from your phone (Android)
+Your PC does all the work: Whisper, the LLM and the Kokoro voice. The phone only records your voice and plays back the reply. The app is about 2 MB and needs no models.
+
+**1. Start the server on the PC**
+```powershell
+.\run-server.bat
+```
+It prints the PC's address(es) and a secret token, which is saved in `server_config.json`. The first time, Windows Firewall asks whether to allow Python. Allow it on **private** networks. You can run the desktop app and the server at the same time.
+
+**2. Build the app.** Open the `android/` folder in Android Studio, let Gradle sync, then use **Run** (phone plugged in with USB debugging on) or **Build → Generate App Bundles or APKs → Build APK(s)**.
+
+**3. Connect.** In the app's settings, enter the address and token that the server printed.
+- **At home:** use the PC's Wi-Fi address, e.g. `192.168.1.20`.
+- **From anywhere:** install [Tailscale](https://tailscale.com/) (free) on both the PC and the phone, sign in with the same account, and use the PC's `100.x.y.z` address. Your PC isn't exposed to the internet, and Tailscale encrypts the connection.
+
+**In the app**
+- Tap the orb to talk. It stops listening when you go quiet, or tap again to send right away.
+- Tap the orb while Jarvis is talking to interrupt him.
+- You can type instead.
+- Settings cover:
+  - model, personality, voice, speed
+  - **Hands-free**: keeps listening after each reply
+  - **PC voice**: turn it off to have the PC send only text, which the phone reads with its own built-in voice (uses less data)
+- Each phone keeps its own chat history on the PC, so it survives reconnects. **+** starts a new chat.
 
 ## Model tips
 On a 4 GB GPU, models around 2–3B parameters fit entirely in VRAM and respond much faster than 7–8B models that spill over to the CPU.

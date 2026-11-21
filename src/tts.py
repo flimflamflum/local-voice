@@ -1,4 +1,7 @@
-"""Text-to-speech pipeline: synthesize sentences on one thread, play on another.
+"""Text-to-speech: `Synthesizer` turns text into audio (used by the phone server),
+`Speaker` adds local playback on top (used by the desktop app).
+
+Speaker pipeline: synthesize sentences on one thread, play on another.
 
 Two engines:
   * Kokoro (neural, offline, ~115 MB in models/) - voice ids look like "kokoro:bm_george"
@@ -94,6 +97,68 @@ class _KokoroEngine:
         return np.asarray(audio, dtype=np.float32), sr
 
 
+_kokoro = None
+_kokoro_error = None
+_kokoro_lock = threading.Lock()
+
+
+def get_kokoro():
+    """Shared Kokoro engine (loaded once per process), or None if it can't load."""
+    global _kokoro, _kokoro_error
+    with _kokoro_lock:
+        if _kokoro is None and _kokoro_error is None and kokoro_available():
+            try:
+                _kokoro = _KokoroEngine()
+            except Exception as e:  # noqa: BLE001
+                _kokoro_error = str(e)
+        return _kokoro
+
+
+def pause_for(text: str) -> float:
+    """Breath after a chunk: longer after a full sentence than after a clause."""
+    ends_sentence = text.rstrip().rstrip("\"')]")[-1:] in (".", "!", "?", "…", "")
+    return SENTENCE_PAUSE if ends_sentence else CLAUSE_PAUSE
+
+
+class Synthesizer:
+    """Text -> audio with whichever engine the voice id names. Plays nothing.
+
+    Create and use it on a single thread (SAPI is a COM object)."""
+
+    def __init__(self):
+        self._sapi = _SapiEngine()
+
+    def voices(self):
+        """[(id, label), ...] - Kokoro voices first (if installed), then Windows voices."""
+        out = [(d, d.replace("Microsoft ", "").split(" - ")[0].replace(" Desktop", "") + " (Windows)")
+               for d in self._sapi.tokens]
+        if kokoro_available():
+            out = [(f"kokoro:{v}", f"{label} · Kokoro") for v, label in KOKORO_VOICE_LABELS.items()] + out
+        return out
+
+    def synth(self, text, voice, rate=0, volume=100):
+        """Raw engine output: (float32 audio, sample_rate). Falls back to SAPI if Kokoro is unavailable."""
+        engine = self._sapi
+        if voice.startswith("kokoro:"):
+            engine = get_kokoro() or self._sapi
+            if engine is self._sapi:
+                voice = ""
+        audio, sr = engine.synth(text, voice, rate)
+        return audio * (volume / 100.0), sr
+
+    def render(self, text, voice, rate=0, volume=100):
+        """Ready-to-play 24 kHz audio with silence trimmed and a natural pause appended.
+        Returns (float32 audio, seconds_of_speech)."""
+        audio, sr = self.synth(text, voice, rate, volume)
+        if not len(audio):
+            return np.zeros(0, np.float32), 0.0
+        return _prepare(audio, sr, pause_for(text))
+
+
+def to_pcm16(audio: np.ndarray) -> bytes:
+    return (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
 class Speaker:
     def __init__(self, on_start=None, on_idle=None):
         self._on_start = on_start or (lambda: None)
@@ -103,9 +168,6 @@ class Speaker:
         self._epoch = 0
         self._lock = threading.Lock()
         self._cfg = {"voice": "", "rate": 0, "volume": 100}
-        self._kokoro = None
-        self._kokoro_lock = threading.Lock()
-        self.kokoro_error = None
         self.busy = False
         self._buf = collections.deque()
         self._buf_pos = 0
@@ -133,7 +195,11 @@ class Speaker:
             self.preload_kokoro()
 
     def preload_kokoro(self):
-        threading.Thread(target=self._get_kokoro, daemon=True).start()
+        threading.Thread(target=get_kokoro, daemon=True).start()
+
+    @property
+    def kokoro_error(self):
+        return _kokoro_error
 
     def say(self, text: str, on_play=None):
         """Queue a sentence. on_play(duration_s) fires the moment it starts coming out
@@ -159,21 +225,9 @@ class Speaker:
         self._audio_q.put((epoch, None, 0, None))  # lets the player report idle
 
     # --------------------------------------------------------------- workers
-    def _get_kokoro(self):
-        with self._kokoro_lock:
-            if self._kokoro is None and self.kokoro_error is None:
-                try:
-                    self._kokoro = _KokoroEngine()
-                except Exception as e:  # noqa: BLE001
-                    self.kokoro_error = str(e)
-            return self._kokoro
-
     def _synth_loop(self):
-        sapi = _SapiEngine()
-        self.voices = [(d, d.replace("Microsoft ", "").split(" - ")[0].replace(" Desktop", "") + " (Windows)")
-                       for d in sapi.tokens]
-        if kokoro_available():
-            self.voices = [(f"kokoro:{v}", f"{label} · Kokoro") for v, label in KOKORO_VOICE_LABELS.items()] + self.voices
+        synth = Synthesizer()
+        self.voices = synth.voices()
         self._ready.set()
 
         while True:
@@ -188,19 +242,11 @@ class Speaker:
                 with self._lock:
                     cfg = dict(self._cfg)
                 try:
-                    engine = sapi
-                    if cfg["voice"].startswith("kokoro:"):
-                        engine = self._get_kokoro() or sapi
-                        if engine is sapi:
-                            cfg["voice"] = ""  # kokoro failed to load: default SAPI voice
-                    audio, sr = engine.synth(text, cfg["voice"], cfg["rate"])
-                    audio = audio * (cfg["volume"] / 100.0)
+                    audio, sr = synth.synth(text, cfg["voice"], cfg["rate"], cfg["volume"])
                 except Exception as e:  # noqa: BLE001
                     print("TTS synth error:", e)  # still pass on_play through so the text shows
             if epoch == self._epoch:
-                ends_sentence = text.rstrip().rstrip("\"')]")[-1:] in (".", "!", "?", "…", "")
-                pause = SENTENCE_PAUSE if ends_sentence else CLAUSE_PAUSE
-                self._audio_q.put((epoch, audio, sr, (on_play, pause)))
+                self._audio_q.put((epoch, audio, sr, (on_play, pause_for(text))))
 
     # ------------------------------------------------------------ playback
     # One output stream stays open for a whole reply and is fed sentence after

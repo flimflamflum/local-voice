@@ -16,7 +16,7 @@ import webview  # noqa: E402
 from src.llm import OllamaClient
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
-from src.stt import Recorder, Transcriber
+from src.stt import Recorder, Transcriber, is_real_speech
 from src.textutil import SentenceChunker, ThinkFilter, clean_for_speech
 from src.tts import Speaker
 
@@ -145,7 +145,7 @@ class Api:
             text = self._transcriber.transcribe(audio)
             if gen != self._gen:
                 return
-            if not _is_real_speech(text):
+            if not is_real_speech(text):
                 self._emit("toast", "Didn't catch that. Try again?")
                 self._set_state("idle")
                 return
@@ -278,13 +278,6 @@ class Api:
             self._window.evaluate_js(js)
         except Exception:  # noqa: BLE001 - window closing
             pass
-
-
-_HALLUCINATIONS = {"", "you", "thank you.", "thanks for watching!", "thank you for watching.", "bye.", "."}
-
-
-def _is_real_speech(text: str) -> bool:
-    return text.strip().lower() not in _HALLUCINATIONS and any(c.isalnum() for c in text)
 
 
 ICON = ROOT / "ui" / "jarvis.ico"
