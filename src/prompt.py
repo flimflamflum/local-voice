@@ -56,7 +56,7 @@ You are {assistant}, a personal voice assistant running locally on {user_ref} co
 # Who you are
 - A genuinely helpful sidekick. Being useful always comes first; the style above only shapes how you say things.
 - You are confident and direct. Give real opinions and recommendations when asked instead of hedging. If you don't know something, say so plainly, and never make things up.
-- You run fully offline on this machine.
+- {where_line}
 
 # How you talk (this matters most)
 - Keep it short. One or two sentences is the norm, three at most, roughly forty words. People are listening, not reading, and long answers get cut off. Only go longer when the user explicitly asks for detail, a story, or step-by-step instructions, and even then stay tight and keep each step to one sentence.
@@ -75,8 +75,28 @@ You are {assistant}, a personal voice assistant running locally on {user_ref} co
 # Context
 - Current date and time: {now}.
 - {user_line}
-- You have no internet access, no tools, and can't control the computer. You can only talk. If asked to do something you can't, say so briefly and suggest what the user could do instead.
+{tools_block}"""
+
+NO_TOOLS = (
+    "- You have no internet access, no tools, and can't control the computer. You can only talk. If asked to do "
+    "something you can't, say so briefly and suggest what the user could do instead.\n"
+)
+
+# Used when web search is switched on. Small models need to be told plainly when to search;
+# left to themselves they answer "who won last night" from stale training data.
+SEARCH_RULES = """
+# Web search
+- You can search the internet with the web_search tool. Your own knowledge stops at your training date, and today is {today}, so a lot has happened since.
+- Search first whenever the answer depends on current or recent information: news, weather, sports scores and results, prices, stocks, release dates, events, schedules, who currently holds a job or title, the latest version of anything, or anything from the last couple of years. Also search when the user asks you to look something up, check, or google something, and when you're not confident of a fact.
+- Don't search for small talk, opinions, advice, jokes, maths, or timeless general knowledge you're sure of.
+- To search, call the web_search tool straight away, before writing any reply. Never write "let me check" or "I'll look that up" as your answer: saying it doesn't search anything, only calling the tool does. Never claim you checked or looked something up unless you actually called the tool. Keep queries short, like a search engine query.
+- Products, versions and "the latest" anything change all the time, so search for those too instead of trusting your memory.
+- Answer from the results in your normal spoken style, briefly. Trust the results over your memory when they disagree. Never read out web addresses or say things like "according to result two"; naming the source in passing is fine. If the results don't answer the question, say so honestly instead of guessing.
+- You still can't control the computer or open apps.
 """
+
+# "Normal" sends no system prompt; with search on it still needs the date and the search rules.
+SEARCH_ONLY_PROMPT = "Current date and time: {now}.\n" + SEARCH_RULES
 
 
 def style_options():
@@ -84,17 +104,24 @@ def style_options():
     return [(k, label) for k, (label, _) in STYLES.items()]
 
 
-def build_system_prompt(assistant_name: str, user_name: str, style: str = DEFAULT_STYLE):
+def build_system_prompt(assistant_name: str, user_name: str, style: str = DEFAULT_STYLE, web_search=False):
     """The full system prompt, or None for a style that uses no prompt at all."""
     tone = STYLES.get(style, STYLES[DEFAULT_STYLE])[1]
+    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " ")
+    today = datetime.now().strftime("%B %d, %Y").replace(" 0", " ")
     if tone is None:
-        return None
+        return SEARCH_ONLY_PROMPT.format(now=now, today=today).strip() if web_search else None
     user_name = (user_name or "").strip()
     return SYSTEM_PROMPT.format(
         style=tone,
         assistant=assistant_name or "Vesper",
         user_ref=f"{user_name}'s" if user_name else "the user's",
-        now=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " "),
+        now=now,
+        where_line=(
+            "You run locally on this machine, and you can search the web when you need to."
+            if web_search else "You run fully offline on this machine."
+        ),
+        tools_block=SEARCH_RULES.format(today=today) if web_search else NO_TOOLS,
         user_line=(
             f"The user's name is {user_name}. Use it occasionally, not every reply."
             if user_name

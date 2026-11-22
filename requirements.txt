@@ -8,3 +8,4 @@ kokoro-onnx>=0.4
 fastapi
 uvicorn[standard]
 segno
+ddgs

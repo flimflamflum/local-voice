@@ -2,7 +2,7 @@
 
 **Vesper** is a fully offline voice assistant for Windows that lets you talk to your local [Ollama](https://ollama.com) models. You speak, Whisper transcribes, your model answers, and a Kokoro neural voice reads the reply back while the text types out in sync with the speech.
 
-Nothing leaves your machine.
+Nothing leaves your machine, unless you switch on **web search**.
 
 ## Requirements
 - Windows 10/11
@@ -37,6 +37,7 @@ Double-click **`Vesper.bat`** or the desktop shortcut.
 | `Esc` / stop button | Shut it up |
 | `Ctrl+N` | New chat (clears memory) |
 | `Ctrl+Shift+V` / **Voice** switch (top left) | Voice mode on/off. Off turns the app into a plain text chat: the orb and mic disappear and nothing is spoken |
+| `Ctrl+Shift+W` / **Web** switch (top left) | Web search on/off. On lets the model look things up (news, weather, scores, prices, anything recent) before it answers. Off by default |
 
 The settings (gear icon) cover:
 - the model
@@ -52,10 +53,11 @@ Each personality is a short tone prompt placed at the start of the system prompt
 | File | What it does |
 |---|---|
 | `src/stt.py` | Captures the mic, stops on silence, and runs **faster-whisper** on the CPU so the GPU stays free for the LLM |
-| `src/llm.py` | Streams from Ollama's `/api/chat`. Thinking is off unless you turn on **Think before answering** in Settings; the reasoning then appears under a collapsed **See thinking** tab above the reply and is never spoken. When you switch models, it unloads the old one first |
+| `src/llm.py` | Streams from Ollama's `/api/chat`. Thinking is off unless you turn on **Think before answering** in Settings; the reasoning then appears under a collapsed **See thinking** tab above the reply and is never spoken. When you switch models, it unloads the old one first. With web search on, it offers the model a `web_search` tool, runs the search when the model calls it, and hands back the results |
+| `src/search.py` | Web search via the `ddgs` package (DuckDuckGo, Bing and Brave, no API key), plus the most relevant lines from the top two pages. Weather questions get live numbers from [wttr.in](https://wttr.in) |
 | `src/textutil.py` | Splits the stream into speakable sentences or clauses, strips markdown and emoji for speech |
 | `src/tts.py` | **Kokoro** (neural, ONNX) or Windows SAPI voices. Synthesis runs ahead of playback, and everything plays through one continuous audio stream so there are no gaps between sentences |
-| `src/prompt.py` | The personality and voice-friendly rules. Edit it to change how Vesper talks |
+| `src/prompt.py` | The personality and voice-friendly rules, plus the rules for when to search the web. Edit it to change how Vesper talks |
 | `ui/` | The interface (HTML/CSS/JS in a pywebview window) |
 | `server.py` | The phone server. It does the same speech-to-text, Ollama and Kokoro work, then streams the text and audio to the Android app. It never plays sound on the PC |
 | `android/` | The Android app (Kotlin + Jetpack Compose) |

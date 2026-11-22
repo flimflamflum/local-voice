@@ -8,7 +8,8 @@ const STATUS = {
   listening:    ["Listening…",  "Go ahead. I'll stop when you pause, or hit <kbd>Space</kbd>"],
   transcribing: ["Got it…",     "Turning your voice into words"],
   thinking:     ["Thinking…",   ""],
-  speaking:     ["Speaking",    '<kbd>Esc</kbd> to interrupt &nbsp;·&nbsp; <kbd>Space</kbd> to cut in'],
+  searching:    ["Searching…",  ""],
+  speaking:    ["Speaking",    '<kbd>Esc</kbd> to interrupt &nbsp;·&nbsp; <kbd>Space</kbd> to cut in'],
 };
 
 // Orb colours per state: [core, edge] as RGB
@@ -17,7 +18,8 @@ const PALETTE = {
   listening:    [[62, 240, 180], [20, 184, 166]],
   transcribing: [[62, 240, 180], [79, 209, 255]],
   thinking:     [[177, 140, 255], [255, 92, 168]],
-  speaking:     [[255, 181, 71], [255, 107, 92]],
+  searching:    [[79, 209, 255], [177, 140, 255]],
+  speaking:    [[255, 181, 71], [255, 107, 92]],
 };
 
 const DEFAULT_NAME = "Vesper";
@@ -25,6 +27,8 @@ const DEFAULT_NAME = "Vesper";
 let api = null;
 let state = "idle";
 let voiceMode = true; // off = plain text chat: no orb, no mic, nothing spoken
+let webSearch = false; // on = the model may search the web before answering
+let searchQuery = ""; // what it's searching for right now (shown under the orb)
 let micLevel = 0;
 let settings = {};
 const bubbles = new Map(); // turn id -> {el, text}
@@ -167,7 +171,10 @@ const handlers = {
     body.dataset.state = s;
     const [label, hint] = STATUS[s] || STATUS.idle;
     $("statusLabel").textContent = label;
-    $("statusHint").innerHTML = s === "thinking" ? escapeHtml(prettyModel(settings.model)) : hint;
+    $("statusHint").innerHTML =
+      s === "thinking" ? escapeHtml(prettyModel(settings.model))
+      : s === "searching" ? escapeHtml(searchQuery ? `“${searchQuery}”` : "the web")
+      : hint;
     if (s !== "listening") micLevel = 0;
   },
   level(l) {
@@ -221,6 +228,33 @@ const handlers = {
     if (warnedNoThink.has(model)) return;
     warnedNoThink.add(model);
     toast(`${prettyModel(model)} can't think, so it answered straight away`, 4500);
+  },
+  // The model is searching the web: a small note above the reply shows what for.
+  search({ id, query }) {
+    searchQuery = query;
+    const b = bubbles.get(id);
+    if (!b) return;
+    const el = document.createElement("div");
+    el.className = "search-note live";
+    el.innerHTML =
+      '<svg viewBox="0 0 24 24" class="ico"><path d="M10.5 3a7.5 7.5 0 0 1 5.9 12.1l4.3 4.3a1 1 0 0 1-1.4 1.4l-4.3-4.3A7.5 7.5 0 1 1 10.5 3Zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Z"/></svg>' +
+      '<span class="sn-label">Searching the web</span><span class="sn-query"></span>';
+    el.querySelector(".sn-query").textContent = query;
+    b.el.insertBefore(el, b.el.querySelector(".bubble"));
+    (b.searches || (b.searches = [])).push(el);
+    scrollChat();
+  },
+  search_done({ id }) {
+    searchQuery = "";
+    const el = bubbles.get(id)?.searches?.at(-1);
+    if (!el) return;
+    el.classList.remove("live");
+    el.querySelector(".sn-label").textContent = "Searched the web for";
+  },
+  cant_search(model) {
+    if (warnedNoSearch.has(model)) return;
+    warnedNoSearch.add(model);
+    toast(`${prettyModel(model)} can't use tools, so it can't search the web`, 4500);
   },
   assistant_done(id) {
     const b = bubbles.get(id);
@@ -280,6 +314,7 @@ function closeBubble(id, b) {
 
 // ------------------------------------------------------------- thinking
 const warnedNoThink = new Set();
+const warnedNoSearch = new Set();
 
 function makeThoughts(b) {
   const el = document.createElement("details");
@@ -360,6 +395,22 @@ function setVoiceMode(on) {
 }
 
 $("voiceToggle").addEventListener("click", () => setVoiceMode(!voiceMode));
+
+// ------------------------------------------------------------ web search
+function applyWebSearch(on) {
+  webSearch = on;
+  $("searchToggle").setAttribute("aria-checked", String(on));
+  $("searchToggleLabel").textContent = on ? "Web on" : "Web off";
+}
+
+function setWebSearch(on) {
+  if (on === webSearch) return;
+  applyWebSearch(on);
+  save({ web_search: on });
+  toast(on ? "Web search on: I'll look things up when I need to" : "Web search off: fully offline");
+}
+
+$("searchToggle").addEventListener("click", () => setWebSearch(!webSearch));
 function stopAll() {
   api?.stop();
 }
@@ -401,6 +452,9 @@ document.addEventListener("keydown", (e) => {
   } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "v") {
     e.preventDefault();
     setVoiceMode(!voiceMode);
+  } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "w") {
+    e.preventDefault();
+    setWebSearch(!webSearch);
   } else if (e.ctrlKey && e.key.toLowerCase() === "n") {
     e.preventDefault();
     newChat();
@@ -540,6 +594,7 @@ function applySettings(s, models, voices, styles) {
   $("assistantName").value = s.assistant_name || DEFAULT_NAME;
   $("brandName").textContent = (s.assistant_name || DEFAULT_NAME).toUpperCase();
   applyVoiceMode(s.voice_mode !== false);
+  applyWebSearch(!!s.web_search);
 }
 
 async function boot() {
@@ -608,6 +663,7 @@ function frame(now) {
   }
 
   // what the blob should be doing
+  const busy = state === "thinking" || state === "searching" || state === "transcribing";
   let target;
   if (state === "listening") target = 0.08 + micLevel * 0.9;
   else if (state === "speaking") {
@@ -616,11 +672,11 @@ function frame(now) {
       nextSyllable = now + 70 + Math.random() * 110;
     }
     target = speakTarget;
-  } else if (state === "thinking" || state === "transcribing") target = 0.18 + Math.sin(t * 4) * 0.05;
+  } else if (busy) target = 0.18 + Math.sin(t * 4) * 0.05;
   else target = 0.05 + Math.sin(t * 1.2) * 0.025; // idle breathing
   energy = lerp(energy, target, state === "speaking" ? 0.25 : 0.15);
 
-  const speed = state === "thinking" ? 3.2 : state === "idle" ? 0.7 : 1.6;
+  const speed = state === "thinking" || state === "searching" ? 3.2 : state === "idle" ? 0.7 : 1.6;
   spin += 0.016 * speed;
 
   ctx.clearRect(0, 0, W, H);
@@ -655,7 +711,7 @@ function frame(now) {
   ctx.restore();
 
   // thinking: orbiting arcs
-  const arcAlpha = state === "thinking" || state === "transcribing" ? 0.85 : 0.18;
+  const arcAlpha = busy ? 0.85 : 0.18;
   ctx.lineCap = "round";
   for (let k = 0; k < 3; k++) {
     const rr = R * (1.28 + k * 0.08);

@@ -231,6 +231,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         if (p.voice.isNotEmpty()) put("voice", p.voice)
         put("rate", p.rate)
         put("server_voice", p.serverVoice && p.voiceMode) // text mode: no audio over the wire
+        put("voice_mode", p.voiceMode) // text mode: the server doesn't cut replies short
         put("think", p.think)
     }
 

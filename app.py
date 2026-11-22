@@ -15,6 +15,7 @@ import webview  # noqa: E402
 
 from src import link
 from src.llm import OllamaClient
+from src import search
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber, is_real_speech
@@ -193,7 +194,9 @@ class Api:
         self._history.append({"role": "user", "content": text})
         self._history[:] = self._history[-MAX_HISTORY:]
         s = self._settings
-        system = build_system_prompt(s.get("assistant_name"), s.get("user_name"), s.get("style"))
+        model = s.get("model")
+        web = bool(s.get("web_search")) and self._ollama.can_use_tools(model)
+        system = build_system_prompt(s.get("assistant_name"), s.get("user_name"), s.get("style"), web)
         messages = ([{"role": "system", "content": system}] if system else []) + self._history
 
         self._set_state("thinking")
@@ -201,12 +204,28 @@ class Api:
             self._model_switch.join(timeout=120)  # old model out before we ask the new one
         self._emit("assistant_start", gen)
         speak = s.get("voice_mode") and s.get("speak_replies")
-        model = s.get("model")
+
+        def call_tool(name, args):
+            if name != "web_search":
+                return f"There is no tool called {name}."
+            query = str(args.get("query") or "").strip()
+            if gen == self._gen:
+                self._emit("search", {"id": gen, "query": query})
+                if self._state != "speaking":  # it may still be saying "let me check"
+                    self._set_state("searching")
+            result = search.search(query)
+            if gen == self._gen:
+                self._emit("search_done", {"id": gen, "query": query})
+                if self._state == "searching":
+                    self._set_state("thinking")
+            return result
         # Reasoning goes to the collapsible "See thinking" panel, never into the reply.
         thoughts = ThoughtStream(
             lambda t, secs: gen == self._gen and self._emit("thought", {"id": gen, "t": t, "secs": secs})
         )
-        think, chunker, limiter = ThinkFilter(thoughts.add), SentenceChunker(), ReplyLimiter(text)
+        think, chunker = ThinkFilter(thoughts.add), SentenceChunker()
+        # The length cap is about how long a reply takes to say; written replies can run long.
+        limiter = ReplyLimiter(text) if speak else None
         full, said, spoke_any, quoted, cut = "", "", False, False, False
 
         def queue_sentences(sentences):
@@ -226,11 +245,12 @@ class Api:
                 else:
                     self._emit("token", {"id": gen, "t": raw})
                 said += raw
-                cut = limiter.done(raw, clean)  # said enough: stop at this sentence
+                cut = bool(limiter) and limiter.done(raw, clean)  # said enough: stop at this sentence
 
         try:
             stream = self._ollama.stream_chat(
-                model, messages, cancel, s.get("temperature"), think=s.get("think"), on_thinking=thoughts.add
+                model, messages, cancel, s.get("temperature"), think=s.get("think"), on_thinking=thoughts.add,
+                tools=[search.TOOL] if web else None, call_tool=call_tool,
             )
             for token in stream:
                 visible = think.feed(token)
@@ -260,6 +280,8 @@ class Api:
             thoughts.finish()
             if s.get("think") and not self._ollama.can_think(model) and gen == self._gen:
                 self._emit("cant_think", model)
+            if s.get("web_search") and not self._ollama.can_use_tools(model) and gen == self._gen:
+                self._emit("cant_search", model)
             reply = said.strip()
             if quoted:
                 reply = reply.rstrip('"”').rstrip()

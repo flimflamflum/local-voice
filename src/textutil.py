@@ -120,7 +120,9 @@ class SentenceChunker:
 
 _DETAIL_ASKED = re.compile(
     r"\b(detail|detailed|details|elaborate|in depth|in-depth|step by step|steps|story|long|longer|"
-    r"tell me more|explain|everything|list|recipe|instructions|write me|write a)\b",
+    r"tell me more|explain|everything|list|recipe|instructions|write me|write a|"
+    r"how (?:to|do|does|can|would|should)|teach me|walk me through|guide|"
+    r"tutorial|bake|cook)\b",
     re.IGNORECASE,
 )
 _SENTENCE_END = re.compile(r"[.!?…][\"')\]]*\s*$")

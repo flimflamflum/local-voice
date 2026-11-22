@@ -1,5 +1,6 @@
 """Streaming chat against the local Ollama HTTP API."""
 import json
+import re
 import threading
 import time
 
@@ -7,7 +8,10 @@ import requests
 
 from src.textutil import RepeatWatch
 
-NUM_CTX = 4096  # small context keeps more of the model on your 4 GB GPU
+# Qwen 3.5's attention keeps its cache tiny, so 8192 costs no extra VRAM or speed on a 4 GB card
+# (measured on a 3050: 43 tok/s at 4k, 8k and 12k; 16k fails to load). It leaves room for search results.
+NUM_CTX = 8192
+MAX_TOOL_ROUNDS = 2  # searches the model may run before it has to answer
 
 # Ollama's VRAM estimate is cautious: on a 4 GB card it puts ~25% of a 4B model on the
 # CPU even though it fits, which halves the speed (17 vs 43 tok/s). Models whose file is
@@ -29,6 +33,19 @@ THINK_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_pena
 ANSWER_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
 
 
+_PROMISE = re.compile(
+    r"\b(let me|i'll|i will|i'm going to|gonna|one sec|hang on|give me a (sec|second|moment))\b"
+    r".{0,40}\b(check|look|search|find|pull|google|see what|dig)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _promised_to_look(reply):
+    """A short reply that only promises to look something up, without having done it."""
+    reply = reply.replace("’", "'").strip()
+    return 0 < len(reply) <= 220 and bool(_PROMISE.search(reply))
+
+
 class _ThinkingTooLong(Exception):
     def __init__(self, why):
         super().__init__(why)
@@ -43,6 +60,7 @@ class OllamaClient:
         self._sizes = {}  # model name -> file size in bytes
         self._no_force = set()  # models that wouldn't load fully onto the GPU
         self._no_think = set()  # models Ollama says can't think (e.g. llama3.1)
+        self._no_tools = set()  # models Ollama says can't call tools
 
     def list_models(self):
         r = requests.get(f"{self.base_url}/api/tags", timeout=5)
@@ -110,13 +128,51 @@ class OllamaClient:
         """False once Ollama has refused thinking for this model."""
         return model not in self._no_think
 
+    def can_use_tools(self, model):
+        """False once Ollama has refused tools for this model."""
+        return model not in self._no_tools
+
     def stream_chat(self, model, messages, cancel: threading.Event, temperature=0.8,
-                    think=False, on_thinking=None):
+                    think=False, on_thinking=None, tools=None, call_tool=None):
         """Yield content tokens. Stops early when `cancel` is set.
 
         With think=True the model reasons first; that reasoning arrives in a separate
         field and goes to on_thinking(text), never into the yielded reply.
+
+        With tools (Ollama tool definitions) and call_tool(name, args) -> str, the model may
+        call a tool instead of answering; we run it, hand back the result and let it go on.
         """
+        messages = list(messages)
+        for round_ in range(MAX_TOOL_ROUNDS + 1):
+            offer = tools if tools and call_tool and round_ < MAX_TOOL_ROUNDS else None
+            meta = {}
+            yield from self._one_reply(model, messages, cancel, temperature, think, on_thinking, offer, meta)
+            calls = meta.get("tool_calls")
+            if not calls and offer and round_ == 0 and _promised_to_look(meta.get("content", "")):
+                # Small models often say "let me check" and stop without calling the tool. It's
+                # already been said, so do the search it promised and let it answer from that.
+                asked = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+                calls = [{"function": {"name": "web_search", "arguments": {"query": asked[:200]}}}]
+            if not calls or cancel.is_set():
+                return
+            messages.append({"role": "assistant", "content": meta.get("content", ""), "tool_calls": calls})
+            if meta.get("content", "").strip():
+                yield "\n\n"  # it said something first ("let me check"): keep the answer apart from it
+            for call in calls:
+                fn = call.get("function") or {}
+                args = fn.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"query": args}
+                result = call_tool(fn.get("name", ""), args)
+                messages.append({"role": "tool", "tool_name": fn.get("name", ""), "content": result})
+                if cancel.is_set():
+                    return
+
+    def _one_reply(self, model, messages, cancel, temperature, think, on_thinking, tools, meta):
+        """One request to the model. Tool calls it makes land in meta["tool_calls"]."""
         think = bool(think) and self.can_think(model)
         sampling = THINK_SAMPLING if think else {"temperature": temperature}
         body = {
@@ -129,8 +185,10 @@ class OllamaClient:
             # sooner). Thinking tokens count toward it too, so give a thinking model more room.
             "options": self._options(model, num_predict=3072 if think else 1024, **sampling),
         }
+        if tools and self.can_use_tools(model):
+            body["tools"] = tools
         if not think:
-            yield from self._chat(body, cancel, on_thinking)
+            yield from self._chat(body, cancel, on_thinking, meta)
             return
 
         tokens, start, watch = 0, time.monotonic(), RepeatWatch()
@@ -146,11 +204,13 @@ class OllamaClient:
             if tokens >= THINK_MAX_TOKENS or time.monotonic() - start > THINK_MAX_SECONDS:
                 raise _ThinkingTooLong("Thought for too long")
 
-        answered, meta = False, {}
+        answered = False
         try:
             for token in self._chat(body, cancel, collect, meta):
                 answered = True
                 yield token
+            if meta.get("tool_calls"):
+                return  # it chose to search; the caller runs it and asks again
             # It stopped on its own without answering. Small models often write the
             # answer inside their thinking and end there; or the token cap ran out.
             why = ("Ran out of room while thinking" if meta.get("done_reason") == "length"
@@ -168,17 +228,22 @@ class OllamaClient:
         if len(notes) > NOTES_MAX_CHARS:
             notes = "..." + notes[-NOTES_MAX_CHARS:]
         last = messages[-1]
+        asked = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         # The question goes last: small models answer whatever they read most recently.
         nudge = (
             "[Private notes you made while thinking about my message. Use them, but never mention them.]\n"
             f"{notes}\n"
             "[End of notes.]\n\n"
-            f"My message: {last['content']}\n\n"
+            f"My message: {asked}\n\n"
             "Reply to my message now with your final answer."
         )
+        if last["role"] == "user":
+            messages = messages[:-1] + [{"role": "user", "content": nudge}]
+        else:  # after a web search: keep the results, add the nudge after them
+            messages = messages + [{"role": "user", "content": nudge}]
         body = {
             "model": model,
-            "messages": messages[:-1] + [{"role": last["role"], "content": nudge}],
+            "messages": messages,
             "stream": True,
             "think": False,
             "keep_alive": "30m",
@@ -189,7 +254,11 @@ class OllamaClient:
     def _chat(self, body, cancel, on_thinking=None, meta=None):
         retry = False
         with requests.post(f"{self.base_url}/api/chat", json=body, stream=True, timeout=300) as r:
-            if r.status_code == 400 and "think" in body and "think" in r.text.lower():
+            if r.status_code == 400 and "tools" in body and "tool" in r.text.lower():
+                self._no_tools.add(body["model"])  # e.g. "llama2 does not support tools"
+                body.pop("tools")
+                retry = True
+            elif r.status_code == 400 and "think" in body and "think" in r.text.lower():
                 if body["think"]:
                     self._no_think.add(body["model"])
                     body["options"]["num_predict"] = 1024
@@ -217,8 +286,12 @@ class OllamaClient:
             thought = message.get("thinking", "")
             if thought and on_thinking:
                 on_thinking(thought)
+            if message.get("tool_calls") and meta is not None:
+                meta.setdefault("tool_calls", []).extend(message["tool_calls"])
             token = message.get("content", "")
             if token:
+                if meta is not None:
+                    meta["content"] = meta.get("content", "") + token
                 yield token
             if chunk.get("done"):
                 if meta is not None:

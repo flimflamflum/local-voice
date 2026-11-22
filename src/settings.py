@@ -15,6 +15,7 @@ DEFAULTS = {
     "voice_mode": True,        # off = plain text chat: no orb, no mic, nothing spoken
     "hands_free": False,       # auto re-listen after the assistant finishes talking
     "think": False,            # let thinking models reason before answering (slower, smarter)
+    "web_search": False,       # let the model search the web (DuckDuckGo) when it needs to
     "style": "playful",        # tone preset, see src/prompt.py STYLES
     "whisper_model": "base.en",
     "user_name": "",

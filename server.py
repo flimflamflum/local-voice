@@ -23,7 +23,9 @@ Protocol (one WebSocket per conversation, at ws://<pc>:8765/ws):
                JSON  {"type": "done", "id"} | {"type": "error", "message"} | {"type": "pong"}
                JSON  {"type": "notice", "message"}             one-off heads-up for the user
   settings: model, style, voice, rate, server_voice (false = text only, phone speaks it),
-            think (true = thinking models reason first; the reasoning comes as "thought")
+            voice_mode (false = text chat, so replies aren't cut to a speakable length),
+            think (true = thinking models reason first; the reasoning comes as "thought"),
+            web_search (optional; when left out, the desktop app's web search switch decides)
 """
 import asyncio
 import collections
@@ -41,6 +43,7 @@ import numpy as np  # noqa: E402
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: E402
 
+from src import search  # noqa: E402
 from src.llm import OllamaClient  # noqa: E402
 from src.prompt import DEFAULT_STYLE, build_system_prompt, style_options  # noqa: E402
 from src.settings import Settings  # noqa: E402
@@ -90,6 +93,7 @@ def default_settings():
         "voice": SETTINGS.get("voice"),
         "rate": SETTINGS.get("rate"),
         "server_voice": True,
+        "voice_mode": True,  # false = text chat: replies aren't trimmed to a speakable length
         "think": False,  # off unless the phone asks (older app builds can't show the reasoning)
     }
 
@@ -195,7 +199,13 @@ class Conversation:
 
             self.history.append({"role": "user", "content": text})
             self.history[:] = self.history[-MAX_HISTORY:]
-            system = build_system_prompt(SETTINGS.get("assistant_name"), SETTINGS.get("user_name"), s["style"])
+            # The desktop's web search switch applies here too (re-read: it can change while we run),
+            # unless the phone sends its own "web_search" setting.
+            web = s.get("web_search")
+            if web is None:
+                web = Settings().get("web_search")
+            s["web_search"] = web = bool(web) and OLLAMA.can_use_tools(s["model"])
+            system = build_system_prompt(SETTINGS.get("assistant_name"), SETTINGS.get("user_name"), s["style"], web)
             messages = ([{"role": "system", "content": system}] if system else []) + list(self.history)
 
             q = asyncio.Queue()
@@ -238,7 +248,8 @@ class Conversation:
             lambda t, secs: put({"type": "thought", "id": turn, "text": t, "secs": secs})
         )
         think, chunker = ThinkFilter(thoughts.add), SentenceChunker()
-        limiter = ReplyLimiter(messages[-1]["content"])
+        # The length cap is about how long a reply takes to say; text mode can run long.
+        limiter = ReplyLimiter(messages[-1]["content"]) if s.get("voice_mode", True) else None
         full, said, quoted, cut = "", "", False, False
 
         def emit(raws):
@@ -252,12 +263,18 @@ class Conversation:
                     fut = SYNTH_POOL.submit(self._synth, turn, clean, s.get("voice"), s.get("rate", 0))
                 put((raw, fut))
                 said += raw
-                cut = limiter.done(raw, clean)  # said enough: stop at this sentence
+                cut = bool(limiter) and limiter.done(raw, clean)  # said enough: stop at this sentence
+
+        def call_tool(name, args):
+            if name != "web_search":
+                return f"There is no tool called {name}."
+            return search.search(str(args.get("query") or ""))
 
         try:
             stream = OLLAMA.stream_chat(
                 s["model"], messages, cancel, SETTINGS.get("temperature"),
                 think=s.get("think"), on_thinking=thoughts.add,
+                tools=[search.TOOL] if s.get("web_search") else None, call_tool=call_tool,
             )
             for token in stream:
                 visible = think.feed(token)
