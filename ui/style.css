@@ -252,6 +252,12 @@ kbd {
   border: 1px solid var(--line);
   border-bottom-left-radius: 5px;
 }
+.reply-stats {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+  color: var(--faint); padding-left: 4px; cursor: default;
+  animation: pop 0.28s ease-out;
+}
+.reply-stats:hover { color: var(--muted); }
 .bubble .caret {
   display: inline-block;
   width: 7px; height: 15px;

@@ -5,6 +5,7 @@ Run:  .venv\\Scripts\\pythonw.exe app.py   (or double-click Vesper.bat)
 import json
 import os
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -14,7 +15,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 import webview  # noqa: E402
 
 from src import link
-from src.llm import OllamaClient
+from src.llm import NUM_CTX, OllamaClient
 from src import search
 from src.coder import CodeAgent
 from src.prompt import build_system_prompt, style_options
@@ -249,6 +250,7 @@ class Api:
             self._set_state("idle")
 
     def _reply_turn(self, text, gen):
+        started = time.monotonic()
         with self._lock:
             if gen != self._gen:
                 return
@@ -289,6 +291,7 @@ class Api:
         # The length cap is about how long a reply takes to say; written replies can run long.
         limiter = ReplyLimiter(text) if speak else None
         full, said, spoke_any, quoted, cut = "", "", False, False, False
+        usage = {}  # token counts, filled in by the client as the reply streams
 
         def queue_sentences(sentences):
             # When speaking, each sentence's text is shown the moment its audio
@@ -312,7 +315,7 @@ class Api:
         try:
             stream = self._ollama.stream_chat(
                 model, messages, cancel, s.get("temperature"), think=s.get("think"), on_thinking=thoughts.add,
-                tools=[search.TOOL] if web else None, call_tool=call_tool,
+                tools=[search.TOOL] if web else None, call_tool=call_tool, usage=usage,
             )
             for token in stream:
                 visible = think.feed(token)
@@ -349,6 +352,13 @@ class Api:
                 reply = reply.rstrip('"”').rstrip()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
+                self._emit("stats", {
+                    "id": gen,
+                    "secs": round(time.monotonic() - started, 2),
+                    "tokens": usage.get("output", 0),
+                    "prompt": usage.get("prompt", 0),
+                    "ctx": NUM_CTX,
+                })
             if speak and gen == self._gen:
                 # fires after the last sentence has played
                 self._speaker.say("", on_play=lambda _d: self._emit("assistant_done", gen))

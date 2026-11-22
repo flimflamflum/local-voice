@@ -36,6 +36,7 @@ let codeFolder = null; // {path, name} of the folder Vesper Code works in
 let micLevel = 0;
 let settings = {};
 const bubbles = new Map(); // turn id -> {el, text}
+const replyEls = new Map(); // turn id -> its message element, kept so stats can land after it closes
 
 // ------------------------------------------------------------------ chat
 function escapeHtml(s) {
@@ -195,6 +196,15 @@ const handlers = {
     const el = addMessage("bot streaming", null, assistantLabel());
     el.querySelector(".bubble").innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
     bubbles.set(id, { el, text: "" });
+    replyEls.set(id, el);
+  },
+  // Token count and time for a finished reply. While the reply is still being spoken,
+  // hold on to it until the bubble closes.
+  stats(st) {
+    const b = bubbles.get(st.id);
+    if (b) b.stats = st;
+    else showStats(replyEls.get(st.id), st);
+    replyEls.delete(st.id);
   },
   token({ id, t }) {
     const b = bubbles.get(id);
@@ -453,11 +463,33 @@ function closeBubble(id, b) {
   b.el.classList.remove("streaming");
   if (b.text.trim()) renderBubble(b); // drop the typing cursor
   if (b.thoughts) endThoughts(b.thoughts);
+  if (b.stats) showStats(b.el, b.stats);
   if (!b.text.trim()) {
     if (!b.thoughts?.body.textContent.trim()) b.el.remove();
     else b.el.querySelector(".bubble").innerHTML = '<span class="no-answer">Stopped before it could answer.</span>';
   }
   bubbles.delete(id);
+}
+
+function fmtSecs(s) {
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
+// "312 tokens · responded in 4.2s" under a reply; hover for speed and context use.
+function showStats(el, { tokens, prompt, secs, ctx }) {
+  if (!el?.isConnected || el.querySelector(".reply-stats")) return;
+  const line = document.createElement("div");
+  line.className = "reply-stats";
+  const n = tokens.toLocaleString();
+  line.textContent = `${n} token${tokens === 1 ? "" : "s"} · responded in ${fmtSecs(secs)}`;
+  const tips = [];
+  if (secs > 0 && tokens) tips.push(`${(tokens / secs).toFixed(1)} tokens/s overall`);
+  if (prompt) tips.push(`${prompt.toLocaleString()} prompt tokens read (context: ${ctx.toLocaleString()})`);
+  line.title = tips.join("\n");
+  el.appendChild(line);
+  scrollChat();
 }
 
 // ---------------------------------------------------------- Vesper Code
@@ -750,6 +782,7 @@ function newChat() {
   api?.new_chat();
   for (const b of bubbles.values()) clearInterval(b.thoughts?.timer);
   bubbles.clear();
+  replyEls.clear();
   $("chat").innerHTML =
     '<div class="empty" id="emptyState"><div class="empty-title">Fresh start.</div><div class="empty-sub">Memory wiped. What\'s on your mind?</div></div>';
 }

@@ -133,7 +133,7 @@ class OllamaClient:
         return model not in self._no_tools
 
     def stream_chat(self, model, messages, cancel: threading.Event, temperature=0.8,
-                    think=False, on_thinking=None, tools=None, call_tool=None):
+                    think=False, on_thinking=None, tools=None, call_tool=None, usage=None):
         """Yield content tokens. Stops early when `cancel` is set.
 
         With think=True the model reasons first; that reasoning arrives in a separate
@@ -141,12 +141,16 @@ class OllamaClient:
 
         With tools (Ollama tool definitions) and call_tool(name, args) -> str, the model may
         call a tool instead of answering; we run it, hand back the result and let it go on.
+
+        With a `usage` dict, token counts for every request this reply makes are added to it
+        (see _iter): "prompt" (tokens read) and "output" (tokens generated, thinking included).
         """
         messages = list(messages)
         for round_ in range(MAX_TOOL_ROUNDS + 1):
             offer = tools if tools and call_tool and round_ < MAX_TOOL_ROUNDS else None
             meta = {}
-            yield from self._one_reply(model, messages, cancel, temperature, think, on_thinking, offer, meta)
+            yield from self._one_reply(model, messages, cancel, temperature, think, on_thinking, offer, meta,
+                                       usage=usage)
             calls = meta.get("tool_calls")
             if not calls and offer and round_ == 0 and _promised_to_look(meta.get("content", "")):
                 # Small models often say "let me check" and stop without calling the tool. It's
@@ -179,7 +183,7 @@ class OllamaClient:
                                    num_predict=num_predict, sampling=sampling)
 
     def _one_reply(self, model, messages, cancel, temperature, think, on_thinking, tools, meta,
-                   num_predict=None, sampling=None):
+                   num_predict=None, sampling=None, usage=None):
         """One request to the model. Tool calls it makes land in meta["tool_calls"]."""
         think = bool(think) and self.can_think(model)
         sampling = sampling or (THINK_SAMPLING if think else {"temperature": temperature})
@@ -197,7 +201,7 @@ class OllamaClient:
         if tools and self.can_use_tools(model):
             body["tools"] = tools
         if not think:
-            yield from self._chat(body, cancel, on_thinking, meta)
+            yield from self._chat(body, cancel, on_thinking, meta, usage)
             return
 
         tokens, start, watch = 0, time.monotonic(), RepeatWatch()
@@ -215,7 +219,7 @@ class OllamaClient:
 
         answered = False
         try:
-            for token in self._chat(body, cancel, collect, meta):
+            for token in self._chat(body, cancel, collect, meta, usage):
                 answered = True
                 yield token
             if meta.get("tool_calls"):
@@ -230,9 +234,9 @@ class OllamaClient:
             return
         # Answer from the notes (minus any loop) in a quick second, non-thinking request.
         on_thinking(f"\n\n[{why}, so it answered from these notes.]")
-        yield from self._answer_from_notes(model, messages, watch.deduped(), cancel)
+        yield from self._answer_from_notes(model, messages, watch.deduped(), cancel, usage)
 
-    def _answer_from_notes(self, model, messages, notes, cancel):
+    def _answer_from_notes(self, model, messages, notes, cancel, usage=None):
         notes = notes.strip()
         if len(notes) > NOTES_MAX_CHARS:
             notes = "..." + notes[-NOTES_MAX_CHARS:]
@@ -258,9 +262,9 @@ class OllamaClient:
             "keep_alive": "30m",
             "options": self._options(model, num_predict=1024, **ANSWER_SAMPLING),
         }
-        yield from self._chat(body, cancel)
+        yield from self._chat(body, cancel, usage=usage)
 
-    def _chat(self, body, cancel, on_thinking=None, meta=None):
+    def _chat(self, body, cancel, on_thinking=None, meta=None, usage=None):
         retry = False
         with requests.post(f"{self.base_url}/api/chat", json=body, stream=True, timeout=300) as r:
             if r.status_code == 400 and "tools" in body and "tool" in r.text.lower():
@@ -277,32 +281,47 @@ class OllamaClient:
                 retry = True
             else:
                 r.raise_for_status()
-                yield from self._iter(r, cancel, on_thinking, meta)
+                yield from self._iter(r, cancel, on_thinking, meta, usage)
         if retry:
-            yield from self._chat(body, cancel, on_thinking, meta)
+            yield from self._chat(body, cancel, on_thinking, meta, usage)
 
     @staticmethod
-    def _iter(resp, cancel, on_thinking=None, meta=None):
-        for line in resp.iter_lines():
-            if cancel.is_set():
-                return
-            if not line:
-                continue
-            chunk = json.loads(line)
-            if chunk.get("error"):
-                raise RuntimeError(chunk["error"])
-            message = chunk.get("message", {})
-            thought = message.get("thinking", "")
-            if thought and on_thinking:
-                on_thinking(thought)
-            if message.get("tool_calls") and meta is not None:
-                meta.setdefault("tool_calls", []).extend(message["tool_calls"])
-            token = message.get("content", "")
-            if token:
-                if meta is not None:
-                    meta["content"] = meta.get("content", "") + token
-                yield token
-            if chunk.get("done"):
-                if meta is not None:
-                    meta["done_reason"] = chunk.get("done_reason")
-                return
+    def _iter(resp, cancel, on_thinking=None, meta=None, usage=None):
+        # Ollama reports exact token counts only in its final chunk. When we stop a reply early
+        # (cut short, interrupted, thinking too long) that chunk never comes, so count the
+        # streamed chunks instead: Ollama sends one per generated token.
+        chunks, counted = 0, False
+        try:
+            for line in resp.iter_lines():
+                if cancel.is_set():
+                    return
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                if chunk.get("error"):
+                    raise RuntimeError(chunk["error"])
+                if chunk.get("done") and usage is not None:
+                    usage["prompt"] = usage.get("prompt", 0) + chunk.get("prompt_eval_count", 0)
+                    usage["output"] = usage.get("output", 0) + chunk.get("eval_count", chunks)
+                    counted = True
+                message = chunk.get("message", {})
+                thought = message.get("thinking", "")
+                if thought:
+                    chunks += 1
+                    if on_thinking:
+                        on_thinking(thought)
+                if message.get("tool_calls") and meta is not None:
+                    meta.setdefault("tool_calls", []).extend(message["tool_calls"])
+                token = message.get("content", "")
+                if token:
+                    chunks += 1
+                    if meta is not None:
+                        meta["content"] = meta.get("content", "") + token
+                    yield token
+                if chunk.get("done"):
+                    if meta is not None:
+                        meta["done_reason"] = chunk.get("done_reason")
+                    return
+        finally:
+            if usage is not None and not counted:
+                usage["output"] = usage.get("output", 0) + chunks
