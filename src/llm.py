@@ -5,6 +5,8 @@ import time
 
 import requests
 
+from src.textutil import RepeatWatch
+
 NUM_CTX = 4096  # small context keeps more of the model on your 4 GB GPU
 
 # Ollama's VRAM estimate is cautious: on a 4 GB card it puts ~25% of a 4B model on the
@@ -20,9 +22,17 @@ THINK_MAX_TOKENS = 2000   # ~24 s on a 2B model, ~45 s on a 4B; leaves context f
 THINK_MAX_SECONDS = 45    # big models that spill onto the CPU think far slower
 NOTES_MAX_CHARS = 6000    # how much of the cut-off reasoning to hand back (the end matters most)
 
+# Sampling Qwen recommends for its Qwen 3.5 models. The presence penalty pushes the model
+# away from words it has already used, which is what stops small models looping while they
+# think; a temperature below 1 makes loops more likely. These replace the temperature setting.
+THINK_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5}
+ANSWER_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+
 
 class _ThinkingTooLong(Exception):
-    pass
+    def __init__(self, why):
+        super().__init__(why)
+        self.why = why
 
 
 class OllamaClient:
@@ -108,6 +118,7 @@ class OllamaClient:
         field and goes to on_thinking(text), never into the yielded reply.
         """
         think = bool(think) and self.can_think(model)
+        sampling = THINK_SAMPLING if think else {"temperature": temperature}
         body = {
             "model": model,
             "messages": messages,
@@ -116,44 +127,54 @@ class OllamaClient:
             "keep_alive": "30m",
             # num_predict is a last-resort token cap (ReplyLimiter normally stops the reply far
             # sooner). Thinking tokens count toward it too, so give a thinking model more room.
-            "options": self._options(model, temperature=temperature, num_predict=3072 if think else 1024),
+            "options": self._options(model, num_predict=3072 if think else 1024, **sampling),
         }
         if not think:
             yield from self._chat(body, cancel, on_thinking)
             return
 
-        notes, start = [], time.monotonic()
+        tokens, start, watch = 0, time.monotonic(), RepeatWatch()
         on_thinking = on_thinking or (lambda _t: None)
 
         def collect(text):
-            notes.append(text)
+            nonlocal tokens
+            tokens += 1
             on_thinking(text)
-            if len(notes) >= THINK_MAX_TOKENS or time.monotonic() - start > THINK_MAX_SECONDS:
-                raise _ThinkingTooLong  # closes the request, so Ollama stops generating
+            # Raising closes the request, so Ollama stops generating too.
+            if watch.feed(text):
+                raise _ThinkingTooLong("Started repeating itself")
+            if tokens >= THINK_MAX_TOKENS or time.monotonic() - start > THINK_MAX_SECONDS:
+                raise _ThinkingTooLong("Thought for too long")
 
-        answered = False
+        answered, meta = False, {}
         try:
-            for token in self._chat(body, cancel, collect):
+            for token in self._chat(body, cancel, collect, meta):
                 answered = True
                 yield token
-        except _ThinkingTooLong:
-            pass
-        if answered or cancel.is_set() or not notes:
+            # It stopped on its own without answering. Small models often write the
+            # answer inside their thinking and end there; or the token cap ran out.
+            why = ("Ran out of room while thinking" if meta.get("done_reason") == "length"
+                   else "Finished thinking without a separate answer")
+        except _ThinkingTooLong as e:
+            why = e.why
+        if answered or cancel.is_set() or not tokens:
             return
-        # It thought too long (or ran out of tokens mid-thought): answer from the notes.
-        on_thinking("\n\n[Thought for too long, so it answered from these notes.]")
-        yield from self._answer_from_notes(model, messages, "".join(notes), cancel, temperature)
+        # Answer from the notes (minus any loop) in a quick second, non-thinking request.
+        on_thinking(f"\n\n[{why}, so it answered from these notes.]")
+        yield from self._answer_from_notes(model, messages, watch.deduped(), cancel)
 
-    def _answer_from_notes(self, model, messages, notes, cancel, temperature):
+    def _answer_from_notes(self, model, messages, notes, cancel):
         notes = notes.strip()
         if len(notes) > NOTES_MAX_CHARS:
             notes = "..." + notes[-NOTES_MAX_CHARS:]
         last = messages[-1]
+        # The question goes last: small models answer whatever they read most recently.
         nudge = (
-            f"{last['content']}\n\n"
-            f"[Your private reasoning about this so far, cut short:]\n{notes}\n\n"
-            "[Stop reasoning now. Reply to the message above with your final answer, "
-            "without mentioning these notes.]"
+            "[Private notes you made while thinking about my message. Use them, but never mention them.]\n"
+            f"{notes}\n"
+            "[End of notes.]\n\n"
+            f"My message: {last['content']}\n\n"
+            "Reply to my message now with your final answer."
         )
         body = {
             "model": model,
@@ -161,11 +182,11 @@ class OllamaClient:
             "stream": True,
             "think": False,
             "keep_alive": "30m",
-            "options": self._options(model, temperature=temperature, num_predict=1024),
+            "options": self._options(model, num_predict=1024, **ANSWER_SAMPLING),
         }
         yield from self._chat(body, cancel)
 
-    def _chat(self, body, cancel, on_thinking=None):
+    def _chat(self, body, cancel, on_thinking=None, meta=None):
         retry = False
         with requests.post(f"{self.base_url}/api/chat", json=body, stream=True, timeout=300) as r:
             if r.status_code == 400 and "think" in body and "think" in r.text.lower():
@@ -178,12 +199,12 @@ class OllamaClient:
                 retry = True
             else:
                 r.raise_for_status()
-                yield from self._iter(r, cancel, on_thinking)
+                yield from self._iter(r, cancel, on_thinking, meta)
         if retry:
-            yield from self._chat(body, cancel, on_thinking)
+            yield from self._chat(body, cancel, on_thinking, meta)
 
     @staticmethod
-    def _iter(resp, cancel, on_thinking=None):
+    def _iter(resp, cancel, on_thinking=None, meta=None):
         for line in resp.iter_lines():
             if cancel.is_set():
                 return
@@ -200,4 +221,6 @@ class OllamaClient:
             if token:
                 yield token
             if chunk.get("done"):
+                if meta is not None:
+                    meta["done_reason"] = chunk.get("done_reason")
                 return

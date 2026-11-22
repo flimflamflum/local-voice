@@ -223,3 +223,47 @@ class ThoughtStream:
         now = time.monotonic()
         rest, self.buf = self.buf.rstrip(), ""
         self.emit(rest, round(now - self.started, 1))
+
+
+_SENT_END = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+class RepeatWatch:
+    """Spots a model going round in circles: the same sentence turning up again and again.
+
+    Small models sometimes get stuck repeating the same couple of sentences while they
+    think. feed() returns True once any real sentence (not "Okay." / "Wait.") has appeared
+    `limit` times. deduped() is the text with every repeat after the first removed.
+    """
+
+    MIN_CHARS = 30  # shorter sentences repeat innocently ("So the answer is 391.")
+
+    def __init__(self, limit=4):
+        self.limit = limit
+        self.buf = ""
+        self.counts = {}
+        self.kept = []  # first copy of each sentence, with its separator
+
+    def feed(self, text: str) -> bool:
+        self.buf += text
+        looping = False
+        while True:
+            m = _SENT_END.search(self.buf)
+            if not m:
+                return looping
+            sentence, sep = self.buf[:m.start()], m.group()
+            self.buf = self.buf[m.end():]
+            looping = self._add(sentence, sep) or looping
+
+    def _add(self, sentence, sep):
+        key = re.sub(r"\W+", " ", sentence.lower()).strip()
+        if len(key) < self.MIN_CHARS:
+            self.kept.append(sentence + sep)
+            return False
+        n = self.counts[key] = self.counts.get(key, 0) + 1
+        if n == 1:
+            self.kept.append(sentence + sep)
+        return n >= self.limit
+
+    def deduped(self) -> str:
+        return "".join(self.kept) + self.buf
