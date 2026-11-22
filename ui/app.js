@@ -9,6 +9,8 @@ const STATUS = {
   transcribing: ["Got it…",     "Turning your voice into words"],
   thinking:     ["Thinking…",   ""],
   searching:    ["Searching…",  ""],
+  working:      ["Working…",    ""],
+  waiting:      ["Waiting for you", ""],
   speaking:    ["Speaking",    '<kbd>Esc</kbd> to interrupt &nbsp;·&nbsp; <kbd>Space</kbd> to cut in'],
 };
 
@@ -29,6 +31,8 @@ let state = "idle";
 let voiceMode = true; // off = plain text chat: no orb, no mic, nothing spoken
 let webSearch = false; // on = the model may search the web before answering
 let searchQuery = ""; // what it's searching for right now (shown under the orb)
+let appMode = "chat"; // "chat" = voice assistant, "code" = Vesper Code
+let codeFolder = null; // {path, name} of the folder Vesper Code works in
 let micLevel = 0;
 let settings = {};
 const bubbles = new Map(); // turn id -> {el, text}
@@ -140,8 +144,12 @@ function renderMarkdown(text, caret = false) {
   return html.replaceAll(CARET, '<span class="caret"></span>');
 }
 
-function addMessage(kind, text, label) {
-  $("emptyState")?.remove();
+function activeChat() {
+  return appMode === "code" ? $("codeChat") : $("chat");
+}
+
+function addMessage(kind, text, label, container = $("chat")) {
+  container.querySelector(".empty, .code-empty")?.remove();
   const wrap = document.createElement("div");
   wrap.className = `msg ${kind}`;
   wrap.innerHTML = `<span class="who"></span><div class="bubble"></div>`;
@@ -150,13 +158,13 @@ function addMessage(kind, text, label) {
   const markdown = kind.startsWith("bot");
   bubble.classList.toggle("md", markdown);
   if (text != null) bubble.innerHTML = markdown ? renderMarkdown(text) : escapeHtml(text);
-  $("chat").appendChild(wrap);
+  container.appendChild(wrap);
   scrollChat();
   return wrap;
 }
 
 function scrollChat() {
-  const chat = $("chat");
+  const chat = activeChat();
   chat.scrollTop = chat.scrollHeight;
 }
 
@@ -264,6 +272,7 @@ const handlers = {
   },
   // Interrupted: keep only what was actually said.
   assistant_cut(id) {
+    if (codeTurns.has(id)) return endCodeTurn(id, "Stopped.");
     const b = bubbles.get(id);
     if (!b) return;
     clearTimeout(b.timer);
@@ -275,7 +284,146 @@ const handlers = {
     closeBubble(id, b);
   },
   error(msg) {
-    addMessage("bot error", msg, "System");
+    addMessage("bot error", msg, "System", activeChat());
+  },
+
+  // ---- Vesper Code: one turn = text blocks, tool cards and permission prompts, in order
+  code_start(id) {
+    const wrap = addMessage("bot code-turn", null, assistantLabel(), $("codeChat"));
+    const steps = wrap.querySelector(".bubble");
+    steps.className = "steps";
+    steps.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+    codeTurns.set(id, { el: wrap, steps, block: null, th: null, card: null });
+    codeTurnEls.set(id, wrap);
+  },
+  // This request changed files: offer to undo them.
+  code_checkpoint({ id, files }) {
+    const wrap = codeTurnEls.get(id);
+    if (!wrap || !files.length) return;
+    const bar = document.createElement("div");
+    bar.className = "turn-undo";
+    bar.innerHTML =
+      '<span class="tu-text"></span><button class="tu-btn" title="">' +
+      '<svg viewBox="0 0 24 24" class="ico"><path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Undo</button>';
+    bar.querySelector(".tu-text").textContent =
+      files.length === 1 ? `Changed ${files[0]}` : `Changed ${files.length} files`;
+    bar.querySelector(".tu-text").title = files.join("\n");
+    bar.querySelector(".tu-btn").title =
+      "Put these files back the way they were before this request (later requests' changes are undone too). " +
+      "Changes made by commands can't be undone.";
+    bar.querySelector(".tu-btn").addEventListener("click", () => undoTurn(id));
+    wrap.appendChild(bar);
+    scrollChat();
+  },
+  code_text({ id, t }) {
+    const turn = codeStep(id);
+    if (!turn) return;
+    if (turn.th) endThoughts(turn.th);
+    if (!turn.block) {
+      if (!t.trim()) return; // don't open a bubble for a stray newline between tool calls
+      const el = document.createElement("div");
+      el.className = "bubble md";
+      turn.steps.appendChild(el);
+      turn.block = { el, text: "" };
+    }
+    turn.block.text += t;
+    turn.block.el.innerHTML = renderMarkdown(turn.block.text.replace(/^\s+/, ""), true);
+    scrollChat();
+  },
+  code_thought({ id, t }) {
+    const turn = codeStep(id);
+    if (!turn) return;
+    if (!turn.th || turn.th.done) {
+      closeBlock(turn);
+      turn.th = makeThoughts(null, turn.steps);
+    }
+    turn.th.body.append(t);
+    if (turn.th.el.open) turn.th.body.scrollTop = turn.th.body.scrollHeight;
+  },
+  code_tool({ id, tid, name, label }) {
+    const turn = codeStep(id);
+    if (!turn) return;
+    closeBlock(turn);
+    if (turn.th) endThoughts(turn.th);
+    const el = document.createElement("details");
+    el.className = "tool-card live";
+    el.dataset.tool = name;
+    el.innerHTML =
+      `<summary>${TOOL_ICONS[name] || TOOL_ICONS.default}<span class="tc-label"></span><span class="tc-sum"></span>` +
+      '<svg viewBox="0 0 24 24" class="tc-chev"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+      '</summary><div class="tc-body"></div>';
+    el.querySelector(".tc-label").textContent = label;
+    el.querySelector(".tc-label").title = label;
+    turn.steps.appendChild(el);
+    turn.card = el;
+    toolCards.set(tid, el);
+    scrollChat();
+  },
+  code_tool_done({ tid, ok, summary, output, diff }) {
+    const el = toolCards.get(tid);
+    if (!el) return;
+    toolCards.delete(tid);
+    el.classList.remove("live", "asking");
+    if (ok && /^(exit code [^0]|exit code -|timed out)/.test(summary)) ok = false; // the command itself failed
+    el.classList.add(ok ? "ok" : "err");
+    const denied = !ok && summary.startsWith("The user said no");
+    el.querySelector(".tc-sum").textContent = denied ? "Denied" : summary;
+    const body = el.querySelector(".tc-body");
+    if (diff) {
+      body.innerHTML = renderDiff(diff);
+      el.open = true; // show what changed, like a code review
+    } else if (output) {
+      body.innerHTML = `<pre>${escapeHtml(output)}</pre>`;
+      el.open = false;
+    } else {
+      body.innerHTML = ok ? "" : `<pre>${escapeHtml(summary)}</pre>`;
+      el.open = false;
+    }
+    scrollChat();
+  },
+  code_ask({ id, ask, kind, label, detail }) {
+    const turn = codeTurns.get(id);
+    const el = turn?.card;
+    if (!el) return api?.code_answer(ask, "deny");
+    el.classList.add("asking");
+    el.open = true;
+    const body = el.querySelector(".tc-body");
+    const always = kind === "edit" ? "Allow all edits" : "Always allow commands";
+    body.innerHTML =
+      `<div class="ask-box"><div class="ask-title">${kind === "edit" ? "Make this change?" : "Run this command?"}</div>` +
+      (kind === "edit" ? renderDiff(detail) : `<div class="ask-cmd"></div>`) +
+      `<div class="ask-btns"><button class="allow" data-a="allow">${kind === "edit" ? "Allow" : "Run"}</button>` +
+      `<button data-a="always">${always}</button><button class="deny" data-a="deny">Deny</button></div></div>`;
+    if (kind !== "edit") body.querySelector(".ask-cmd").textContent = label;
+    body.querySelectorAll("button").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const answer = btn.dataset.a;
+        api?.code_answer(ask, answer);
+        el.classList.remove("asking");
+        body.innerHTML = "";
+        if (answer === "always" && kind === "edit") {
+          $("codeAutoEdits").checked = true;
+          save({ code_auto_edits: true });
+          toast("Auto-accept edits on: I'll stop asking before changing files");
+        }
+        $("textInput").focus();
+      }),
+    );
+    body.querySelector(".allow").focus();
+    scrollChat();
+  },
+  code_note({ id, t }) {
+    const turn = codeStep(id);
+    if (!turn) return;
+    closeBlock(turn);
+    const el = document.createElement("div");
+    el.className = "code-note";
+    el.textContent = t;
+    turn.steps.appendChild(el);
+    scrollChat();
+  },
+  code_done(id) {
+    endCodeTurn(id);
   },
   toast(msg) {
     toast(msg);
@@ -312,11 +460,181 @@ function closeBubble(id, b) {
   bubbles.delete(id);
 }
 
+// ---------------------------------------------------------- Vesper Code
+const codeTurns = new Map(); // turn id -> {el, steps, block, th, card}
+const toolCards = new Map(); // tool call id -> its card
+const codeTurnEls = new Map(); // turn id -> its message element (kept after the turn ends, for Undo)
+
+async function undoTurn(id) {
+  if (!api) return;
+  const r = await api.code_undo(id);
+  if (r.error) return toast(r.error, 4000);
+  for (const t of r.undone) {
+    const bar = codeTurnEls.get(t)?.querySelector(".turn-undo");
+    if (!bar) continue;
+    bar.classList.add("undone");
+    bar.querySelector(".tu-btn").remove();
+    bar.querySelector(".tu-text").textContent = "Undone: files put back";
+  }
+  const n = r.files.length;
+  toast(n === 1 ? `Undid the changes to ${r.files[0]}` : `Undid the changes to ${n} files`);
+}
+
+const svgIco = (d) =>
+  `<svg viewBox="0 0 24 24" class="tc-ico"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const TOOL_ICONS = {
+  list_files: svgIco("M3.5 6.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11Z"),
+  read_file: svgIco("M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5M9 13h6M9 17h4"),
+  search_files: svgIco("M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm9.5 16-4.8-4.8"),
+  write_file: svgIco("M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5M12 11v6M9 14h6"),
+  edit_file: svgIco("M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4"),
+  run_command: svgIco("m5 7 5 5-5 5M12 18h7"),
+  web_search: svgIco("M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z"),
+  default: svgIco("M12 4v16M4 12h16"),
+};
+
+function codeStep(id) {
+  const turn = codeTurns.get(id);
+  turn?.steps.querySelector(":scope > .typing")?.remove();
+  return turn;
+}
+
+function closeBlock(turn) {
+  if (!turn.block) return;
+  const text = turn.block.text.trim();
+  if (text) turn.block.el.innerHTML = renderMarkdown(text);
+  else turn.block.el.remove();
+  turn.block = null;
+}
+
+function endCodeTurn(id, note) {
+  const turn = codeTurns.get(id);
+  if (!turn) return;
+  codeTurns.delete(id);
+  turn.steps.querySelector(":scope > .typing")?.remove();
+  closeBlock(turn);
+  if (turn.th) endThoughts(turn.th);
+  turn.steps.querySelectorAll(".tool-card.live").forEach((el) => {
+    el.classList.remove("live", "asking");
+    el.classList.add("err");
+    el.querySelector(".tc-sum").textContent = "Stopped";
+    el.querySelector(".tc-body").innerHTML = "";
+    el.open = false;
+  });
+  if (note && turn.steps.children.length) {
+    const n = document.createElement("div");
+    n.className = "code-note";
+    n.textContent = note;
+    turn.steps.appendChild(n);
+  }
+  if (!turn.steps.children.length && !turn.el.querySelector(".turn-undo")) turn.el.remove();
+}
+
+function renderDiff(diff) {
+  const rows = (diff || "").split("\n").map((line) => {
+    const cls = line.startsWith("+++") || line.startsWith("---") ? "d-file"
+      : line.startsWith("@@") ? "d-hunk"
+      : line.startsWith("+") ? "d-add"
+      : line.startsWith("-") ? "d-del" : "d-ctx";
+    return `<div class="${cls}">${escapeHtml(line) || " "}</div>`;
+  });
+  return `<div class="diff">${rows.join("")}</div>`;
+}
+
+function codeEmptyState() {
+  const chat = $("codeChat");
+  chat.innerHTML = "";
+  const el = document.createElement("div");
+  el.className = "code-empty";
+  if (!codeFolder) {
+    el.innerHTML =
+      '<div class="empty-title">Vesper Code</div>' +
+      '<div class="empty-sub">Pick a folder and your local model can read, write and run the code in it. It asks before changing anything.</div>' +
+      '<button class="primary-btn" id="pickFolderBig">Choose a folder</button>';
+    el.querySelector("button").addEventListener("click", chooseFolder);
+  } else {
+    el.innerHTML =
+      '<div class="empty-title"></div>' +
+      '<div class="empty-sub">Ask it to build, fix or explain something in this folder.</div>' +
+      '<div class="ce-tips"></div>';
+    el.querySelector(".empty-title").textContent = `Working in ${codeFolder.name}`;
+    for (const tip of ["What's in this folder? Give me a quick overview.",
+                       "Find and fix any obvious bugs.",
+                       "Make a small Python script that prints today's date."]) {
+      const t = document.createElement("div");
+      t.className = "ce-tip";
+      t.textContent = tip;
+      t.addEventListener("click", () => {
+        $("textInput").value = tip;
+        $("textInput").focus();
+      });
+      el.querySelector(".ce-tips").appendChild(t);
+    }
+  }
+  chat.appendChild(el);
+}
+
+function applyFolder(info) {
+  codeFolder = info || null;
+  $("folderName").textContent = codeFolder ? codeFolder.name : "Choose a folder";
+  $("folderPath").textContent = codeFolder ? codeFolder.path : "";
+  $("folderPath").title = codeFolder ? codeFolder.path : "";
+  updateComposer();
+}
+
+async function chooseFolder() {
+  if (!api) return;
+  const before = codeFolder?.path;
+  const info = await api.choose_folder();
+  if (!info) return;
+  applyFolder(info);
+  if (info.path !== before) {
+    codeEmptyState();
+    toast(`Vesper Code is now working in ${info.name}`);
+  }
+  $("textInput").focus();
+}
+
+function applyMode(mode) {
+  appMode = mode === "code" ? "code" : "chat";
+  body.classList.toggle("code-mode", appMode === "code");
+  for (const b of document.querySelectorAll("#modeSwitch button")) {
+    b.setAttribute("aria-selected", String(b.dataset.mode === appMode));
+  }
+  updateComposer();
+  scrollChat();
+}
+
+function setMode(mode) {
+  if (mode === appMode) return;
+  applyMode(mode);
+  save({ app_mode: appMode });
+  $("textInput").focus();
+}
+
+function updateComposer() {
+  const input = $("textInput");
+  if (appMode === "code") {
+    input.disabled = !codeFolder;
+    input.placeholder = codeFolder ? `Ask ${assistantLabel()} Code to build, fix or explain something…` : "Choose a folder first";
+  } else {
+    input.disabled = false;
+    input.placeholder = voiceMode ? "…or type a message" : "Message " + assistantLabel();
+  }
+}
+
+document.querySelectorAll("#modeSwitch button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+$("folderBtn").addEventListener("click", chooseFolder);
+$("codeAutoEdits").addEventListener("change", (e) => {
+  save({ code_auto_edits: e.target.checked });
+  toast(e.target.checked ? "Auto-accept edits on: file changes apply without asking" : "Auto-accept edits off: I'll ask before each change");
+});
+
 // ------------------------------------------------------------- thinking
 const warnedNoThink = new Set();
 const warnedNoSearch = new Set();
 
-function makeThoughts(b) {
+function makeThoughts(b, parent = null) {
   const el = document.createElement("details");
   el.className = "thoughts live";
   el.innerHTML =
@@ -324,7 +642,8 @@ function makeThoughts(b) {
     '<span class="th-time"></span>' +
     '<svg viewBox="0 0 24 24" class="th-chev"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
     "</summary><div class=\"th-body\"></div>";
-  b.el.insertBefore(el, b.el.querySelector(".bubble"));
+  if (parent) parent.appendChild(el);
+  else b.el.insertBefore(el, b.el.querySelector(".bubble"));
   const th = { el, body: el.querySelector(".th-body"), label: el.querySelector(".th-label"),
                time: el.querySelector(".th-time"), start: performance.now(), done: false };
   const tickTime = () => (th.time.textContent = `${Math.floor((performance.now() - th.start) / 1000)}s`);
@@ -373,7 +692,7 @@ function prettyModel(name = "") {
 
 // -------------------------------------------------------------- controls
 function talk() {
-  if (voiceMode) api?.toggle_listen();
+  if (voiceMode && appMode === "chat") api?.toggle_listen();
 }
 
 // ------------------------------------------------------------ voice mode
@@ -382,7 +701,7 @@ function applyVoiceMode(on) {
   body.classList.toggle("text-mode", !on);
   $("voiceToggle").setAttribute("aria-checked", String(on));
   $("voiceToggleLabel").textContent = on ? "Voice on" : "Voice off";
-  $("textInput").placeholder = on ? "…or type a message" : "Message " + assistantLabel();
+  updateComposer();
 }
 
 function setVoiceMode(on) {
@@ -420,6 +739,14 @@ $("stopBtn").addEventListener("click", stopAll);
 $("newChatBtn").addEventListener("click", newChat);
 
 function newChat() {
+  if (appMode === "code") {
+    api?.code_new();
+    codeTurns.clear();
+    toolCards.clear();
+    codeTurnEls.clear();
+    codeEmptyState();
+    return;
+  }
   api?.new_chat();
   for (const b of bubbles.values()) clearInterval(b.thoughts?.timer);
   bubbles.clear();
@@ -436,7 +763,13 @@ $("textForm").addEventListener("submit", (e) => {
     return;
   }
   input.value = "";
-  api?.send_text(text);
+  if (appMode === "code") {
+    if (!codeFolder) return chooseFolder();
+    addMessage("user", text, "You", $("codeChat"));
+    api?.code_send(text);
+  } else {
+    api?.send_text(text);
+  }
 });
 
 document.addEventListener("keydown", (e) => {
@@ -595,12 +928,16 @@ function applySettings(s, models, voices, styles) {
   $("brandName").textContent = (s.assistant_name || DEFAULT_NAME).toUpperCase();
   applyVoiceMode(s.voice_mode !== false);
   applyWebSearch(!!s.web_search);
+  $("codeAutoEdits").checked = !!s.code_auto_edits;
+  applyMode(s.app_mode);
 }
 
 async function boot() {
   api = window.pywebview.api;
   bindSettings();
   const info = await api.init();
+  applyFolder(info.code_folder);
+  codeEmptyState();
   applySettings(info.settings, info.models, info.voices, info.styles);
   $("whisperStatus").textContent = info.whisper_ready ? "ready" : "loading…";
   if (info.error) addMessage("bot error", info.error, "System");

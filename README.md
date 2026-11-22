@@ -54,6 +54,7 @@ Each personality is a short tone prompt placed at the start of the system prompt
 |---|---|
 | `src/stt.py` | Captures the mic, stops on silence, and runs **faster-whisper** on the CPU so the GPU stays free for the LLM |
 | `src/llm.py` | Streams from Ollama's `/api/chat`. Thinking is off unless you turn on **Think before answering** in Settings; the reasoning then appears under a collapsed **See thinking** tab above the reply and is never spoken. When you switch models, it unloads the old one first. With web search on, it offers the model a `web_search` tool, runs the search when the model calls it, and hands back the results |
+| `src/coder.py` | **Vesper Code**: the coding agent. File tools locked to the chosen folder, permission prompts, PowerShell commands, and trimming old tool output to fit the context window |
 | `src/search.py` | Web search via the `ddgs` package (DuckDuckGo, Bing and Brave, no API key), plus the most relevant lines from the top two pages. Weather questions get live numbers from [wttr.in](https://wttr.in) |
 | `src/textutil.py` | Splits the stream into speakable sentences or clauses, strips markdown and emoji for speech |
 | `src/tts.py` | **Kokoro** (neural, ONNX) or Windows SAPI voices. Synthesis runs ahead of playback, and everything plays through one continuous audio stream so there are no gaps between sentences |
@@ -61,6 +62,20 @@ Each personality is a short tone prompt placed at the start of the system prompt
 | `ui/` | The interface (HTML/CSS/JS in a pywebview window) |
 | `server.py` | The phone server. It does the same speech-to-text, Ollama and Kokoro work, then streams the text and audio to the Android app. It never plays sound on the PC |
 | `android/` | The Android app (Kotlin + Jetpack Compose) |
+
+## Vesper Code
+Switch **Chat → Code** at the top left to use your local model as a coding assistant, a bit like Claude Code:
+1. Click **Choose a folder**. Vesper Code can only see and change files inside it.
+2. Ask for something: "make a snake game in Python", "why does this crash?", "add a dark mode to index.html".
+3. The model looks around (list, read and search files), makes changes and runs commands. Each step shows up as a card; edits show a diff.
+
+**Safety.** File reading and editing are locked to the chosen folder. Commands run as you, so they get a guard: anything that points outside the folder (other paths, `..`, `~`, `%APPDATA%`…) or could do damage Undo can't reverse (bulk or recursive deletes, `git push`/`reset --hard`/`clean`, registry, disk, admin rights, download-and-run, encoded commands) is refused before you're even asked. The model is told to hand you the command to run yourself instead. It's a safety net, not a sandbox, so still read commands before running them.
+
+**Undo.** Each request that changed files gets an **Undo** button that puts those files back (and deletes files it created). Undoing an earlier request also undoes the ones after it. Changes made by commands can't be undone.
+
+Every file change and command asks first: **Allow**, **Allow all** (for the rest of the conversation) or **Deny**. Turn on **Auto-accept edits** in the folder bar to stop being asked about file changes; commands always ask unless you pick **Always allow commands**. `Esc` or the stop button stops it, and `Ctrl+N` starts a fresh conversation.
+
+It needs a model that supports tools, such as Qwen 3.5. A small model handles small, contained jobs well; for big projects, use a bigger model (and raise `NUM_CTX` in `src/llm.py` if your GPU has room). With **Web** on, it can also search the web for docs and error messages.
 
 ## Talk to Vesper from your phone (Android)
 Your PC does all the work: Whisper, the LLM and the Kokoro voice. The phone only records your voice and plays back the reply. The app is about 2 MB and needs no models.

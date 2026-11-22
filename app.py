@@ -16,6 +16,7 @@ import webview  # noqa: E402
 from src import link
 from src.llm import OllamaClient
 from src import search
+from src.coder import CodeAgent
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber, is_real_speech
@@ -40,6 +41,9 @@ class Api:
         self._state = "idle"
         self._interrupted = False
         self._model_switch = None  # thread unloading old model / loading new one
+        self._coder = None  # Vesper Code agent for the chosen folder
+        self._code_thread = None  # the Vesper Code request running now, if any
+        self._asks = {}  # Vesper Code permission prompts waiting for an answer: id -> [Event, answer]
 
         self._recorder = Recorder(on_level=lambda lvl: self._emit("level", round(lvl, 3)))
         self._transcriber = Transcriber(self._settings.get("whisper_model"))
@@ -74,7 +78,60 @@ class Api:
             "styles": style_options(),
             "whisper_ready": self._transcriber.ready.is_set() and self._transcriber.model is not None,
             "error": err,
+            "code_folder": self._folder_info(),
         }
+
+    # ------------------------------------------------------------ Vesper Code
+    def choose_folder(self):
+        """Folder picker for Vesper Code. Returns the folder info, or None if cancelled."""
+        start = self._settings.get("code_folder") or str(Path.home())
+        picked = self._window.create_file_dialog(webview.FileDialog.FOLDER, directory=start)
+        if not picked:
+            return None
+        folder = str(Path(picked[0] if isinstance(picked, (list, tuple)) else picked).resolve())
+        if folder != self._settings.get("code_folder"):
+            self._interrupt()
+            self._set_state("idle")
+            self._settings.update({"code_folder": folder})
+            self._coder = None
+        return self._folder_info()
+
+    def code_send(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        self._interrupt()
+        gen = self._gen
+        self._code_thread = threading.Thread(target=self._code_turn, args=(text, gen), daemon=True)
+        self._code_thread.start()
+
+    def code_new(self):
+        self._interrupt()
+        if self._coder:
+            self._coder.clear()
+        self._set_state("idle")
+
+    def code_undo(self, turn):
+        """Undo the file changes from Vesper Code request `turn` (and any after it)."""
+        if not self._coder:
+            return {"error": "There's nothing to undo."}
+        worker = self._code_thread
+        if worker is not None and worker.is_alive():
+            self._interrupt()  # don't restore files under a turn that's still editing them
+            self._set_state("idle")
+            worker.join(timeout=10)
+        try:
+            undone, files = self._coder.undo(turn)
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+        return {"undone": undone, "files": files}
+
+    def code_answer(self, ask_id, answer):
+        """The user's choice on a permission prompt: "allow", "always" or "deny"."""
+        waiting = self._asks.get(ask_id)
+        if waiting:
+            waiting[1] = answer
+            waiting[0].set()
 
     def toggle_listen(self):
         if not self._settings.get("voice_mode"):
@@ -109,6 +166,11 @@ class Api:
         if changes.get("voice_mode") is False and (self._recorder.active or self._speaker.busy):
             self._interrupt()  # switched to text: stop listening / talking right away
             self._set_state("idle")
+        if "app_mode" in changes and changes["app_mode"] != self._settings.get("app_mode"):
+            self._interrupt()  # switching between Chat and Code stops whatever was running
+            self._set_state("idle")
+        if "code_auto_edits" in changes and self._coder:
+            self._coder.allow_edits = bool(changes["code_auto_edits"])
         data = self._settings.update(changes or {})
         if {"voice", "rate", "volume"} & set(changes):
             self._speaker.configure(
@@ -300,6 +362,49 @@ class Api:
             self._set_state("idle")
             self._maybe_hands_free(gen)
 
+    def _code_turn(self, text, gen):
+        with self._lock:
+            if gen != self._gen:
+                return
+            cancel = self._cancel
+        s = self._settings
+        folder = s.get("code_folder")
+        if not folder or not Path(folder).is_dir():
+            self._emit("error", "Choose a folder for Vesper Code first.")
+            return
+        if self._coder is None or str(self._coder.root) != str(Path(folder).resolve()):
+            self._coder = CodeAgent(self._ollama, folder, s.get("assistant_name"))
+        agent = self._coder
+        agent.allow_edits = agent.allow_edits or bool(s.get("code_auto_edits"))
+        model = s.get("model")
+        self._set_state("thinking")
+        if self._model_switch is not None:
+            self._model_switch.join(timeout=120)
+        self._emit("code_start", gen)
+        try:
+            agent.run(model, text, cancel, _CodeUI(self, gen, cancel),
+                      think=s.get("think"), web=bool(s.get("web_search")), turn=gen)
+            if not self._ollama.can_use_tools(model) and gen == self._gen:
+                self._emit("error", f"{model} can't use tools, so it can't read or change files. Pick a model "
+                                    "that supports tools, like Qwen 3.5.")
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            if gen == self._gen:
+                self._emit("error", f"Vesper Code error: {e}")
+        finally:
+            files = agent.changed_files(gen)
+            if files:  # even when stopped part-way: those edits can be undone too
+                self._emit("code_checkpoint", {"id": gen, "files": files})
+            self._emit("code_done", gen)
+            if gen == self._gen:
+                self._set_state("idle")
+
+    def _folder_info(self):
+        folder = self._settings.get("code_folder")
+        if not folder or not Path(folder).is_dir():
+            return None
+        return {"path": folder, "name": Path(folder).name or folder}
+
     # ------------------------------------------------------------- helpers
     def _interrupt(self):
         self._emit("assistant_cut", self._gen)  # freeze the bubble at what was actually said
@@ -346,6 +451,54 @@ class Api:
             self._window.evaluate_js(js)
         except Exception:  # noqa: BLE001 - window closing
             pass
+
+
+class _CodeUI:
+    """Sends a Vesper Code turn's progress to the window; asks the user for permission."""
+
+    def __init__(self, api, gen, cancel):
+        self.api, self.gen, self.cancel = api, gen, cancel
+
+    def _send(self, kind, payload):
+        if self.gen == self.api._gen:
+            self.api._emit(kind, {"id": self.gen, **payload})
+
+    def token(self, t):
+        self._send("code_text", {"t": t})
+
+    def thought(self, t):
+        self._send("code_thought", {"t": t})
+
+    def tool_start(self, tid, name, label):
+        self._send("code_tool", {"tid": tid, "name": name, "label": label})
+        if self.gen == self.api._gen:
+            self.api._set_state("working")
+
+    def tool_end(self, tid, ok, summary, output, diff):
+        self._send("code_tool_done", {"tid": tid, "ok": ok, "summary": summary,
+                                      "output": output[-6000:], "diff": diff})
+        if self.gen == self.api._gen:
+            self.api._set_state("thinking")
+
+    def note(self, text):
+        self._send("code_note", {"t": text})
+
+    def ask(self, kind, label, detail):
+        ask_id = f"a{self.gen}_{len(self.api._asks)}_{id(label)}"
+        waiting = [threading.Event(), "deny"]
+        self.api._asks[ask_id] = waiting
+        self._send("code_ask", {"ask": ask_id, "kind": kind, "label": label, "detail": detail})
+        if self.gen == self.api._gen:
+            self.api._set_state("waiting")
+        try:
+            while not waiting[0].wait(0.2):
+                if self.cancel.is_set():
+                    return "deny"
+            return waiting[1]
+        finally:
+            self.api._asks.pop(ask_id, None)
+            if self.gen == self.api._gen and not self.cancel.is_set():
+                self.api._set_state("working")
 
 
 ICON = ROOT / "ui" / "jarvis.ico"

@@ -16,6 +16,9 @@ DEFAULTS = {
     "hands_free": False,       # auto re-listen after the assistant finishes talking
     "think": False,            # let thinking models reason before answering (slower, smarter)
     "web_search": False,       # let the model search the web (DuckDuckGo) when it needs to
+    "app_mode": "chat",        # "chat" = the voice assistant, "code" = Vesper Code
+    "code_folder": "",         # the folder Vesper Code works in
+    "code_auto_edits": False,  # Vesper Code: apply file edits without asking each time
     "style": "playful",        # tone preset, see src/prompt.py STYLES
     "whisper_model": "base.en",
     "user_name": "",

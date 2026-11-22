@@ -171,10 +171,19 @@ class OllamaClient:
                 if cancel.is_set():
                     return
 
-    def _one_reply(self, model, messages, cancel, temperature, think, on_thinking, tools, meta):
+    def chat_step(self, model, messages, cancel, meta, tools=None, think=False, on_thinking=None,
+                  num_predict=None, sampling=None):
+        """One model turn for an agent loop (Vesper Code): yields reply tokens, and any tool
+        calls the model makes land in meta["tool_calls"] for the caller to run."""
+        yield from self._one_reply(model, messages, cancel, 0.7, think, on_thinking, tools, meta,
+                                   num_predict=num_predict, sampling=sampling)
+
+    def _one_reply(self, model, messages, cancel, temperature, think, on_thinking, tools, meta,
+                   num_predict=None, sampling=None):
         """One request to the model. Tool calls it makes land in meta["tool_calls"]."""
         think = bool(think) and self.can_think(model)
-        sampling = THINK_SAMPLING if think else {"temperature": temperature}
+        sampling = sampling or (THINK_SAMPLING if think else {"temperature": temperature})
+        num_predict = num_predict or (3072 if think else 1024)
         body = {
             "model": model,
             "messages": messages,
@@ -183,7 +192,7 @@ class OllamaClient:
             "keep_alive": "30m",
             # num_predict is a last-resort token cap (ReplyLimiter normally stops the reply far
             # sooner). Thinking tokens count toward it too, so give a thinking model more room.
-            "options": self._options(model, num_predict=3072 if think else 1024, **sampling),
+            "options": self._options(model, num_predict=num_predict, **sampling),
         }
         if tools and self.can_use_tools(model):
             body["tools"] = tools
