@@ -228,8 +228,11 @@ private fun Bubble(m: ChatMsg) {
                         .border(1.dp, if (user) Accent.copy(alpha = 0.25f) else Line, shape)
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                 ) {
-                    val text = if (m.live && m.text.isEmpty()) "…" else m.text
-                    Text(text, color = TextColor, fontSize = 15.sp, lineHeight = 21.sp)
+                    when {
+                        m.live && m.text.isEmpty() -> Text("…", color = TextColor, fontSize = 15.sp, lineHeight = 21.sp)
+                        user -> Text(m.text, color = TextColor, fontSize = 15.sp, lineHeight = 21.sp)
+                        else -> Markdown(m.text) // headings, tables, lists from the model
+                    }
                 }
             }
         }

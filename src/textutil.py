@@ -14,9 +14,22 @@ _EMOJI = re.compile(
 )
 
 
+# Table separator rows ("|---|:--:|") and dividers ("---", "***"): nothing to say.
+_RULE_LINE = re.compile(r"^\s*(?:\|?[\s:|-]*-{3,}[\s:|-]*\|?|[*_]{3,})\s*$", re.M)
+_TABLE_ROW = re.compile(r"^\s*\|(.*)\|\s*$", re.M)
+
+
+def _speak_row(m):
+    """'| Flour | 2 cups |' -> 'Flour, 2 cups.' so table rows are read with pauses."""
+    cells = [c.strip() for c in m.group(1).split("|") if c.strip()]
+    return ", ".join(cells) + "." if cells else ""
+
+
 def clean_for_speech(text: str) -> str:
     """Strip markdown/code/emoji so the TTS reads natural text."""
     text = _CODE_BLOCK.sub(" I've put the code on screen. ", text)
+    text = _RULE_LINE.sub("", text)
+    text = _TABLE_ROW.sub(_speak_row, text)
     text = _LINK.sub(r"\1", text)
     text = _URL.sub("the link on screen", text)
     text = _INLINE_CODE.sub(r"\1", text)

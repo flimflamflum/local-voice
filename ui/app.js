@@ -31,22 +31,106 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function renderMarkdownLite(text) {
+// ------------------------------------------------------------ markdown
+// Replies can contain Markdown: headings, tables, lists, dividers, code. Rendered by hand
+// (no library) and safe: every bit of model text goes through escapeHtml first.
+const CARET = ""; // marks where the typing cursor goes while a reply streams in
+
+function renderInline(s) {
+  return escapeHtml(s)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, "$1<em>$2</em>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+    .replace(/\[([^\]\n]+)\]\(([^)\s]*)\)/g, '<span class="md-link">$1</span>');
+}
+
+const TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+const isTableRow = (l) => l.includes("|") && l.trim().length > 1;
+const splitRow = (l) =>
+  l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+function renderTable(header, rule, rows) {
+  const aligns = splitRow(rule).map((c) =>
+    c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left");
+  const cell = (tag, text, i) =>
+    `<${tag}${aligns[i] && aligns[i] !== "left" ? ` style="text-align:${aligns[i]}"` : ""}>${renderInline(text ?? "")}</${tag}>`;
+  const head = header.map((h, i) => cell("th", h, i)).join("");
+  const body = rows.map((r) => `<tr>${header.map((_, i) => cell("td", r[i], i)).join("")}</tr>`).join("");
+  return `<div class="md-table"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderBlocks(src) {
+  const lines = src.split("\n");
+  let html = "";
+  let para = [];
+  let list = null; // {tag: "ul" | "ol", start, items: []}
+  const flushPara = () => {
+    if (para.length) html += `<p>${para.map(renderInline).join("<br>")}</p>`;
+    para = [];
+  };
+  const flushList = () => {
+    if (list) {
+      const start = list.tag === "ol" && list.start !== 1 ? ` start="${list.start}"` : "";
+      html += `<${list.tag}${start}>${list.items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</${list.tag}>`;
+    }
+    list = null;
+  };
+  const flush = () => (flushPara(), flushList());
+  const addItem = (tag, text, start = 1) => {
+    flushPara();
+    if (list?.tag !== tag) {
+      flushList();
+      list = { tag, start, items: [] };
+    }
+    list.items.push(text);
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m;
+    if (!line.trim()) {
+      flush();
+    } else if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) {
+      flush();
+      html += `<div class="md-h md-h${Math.min(m[1].length, 4)}">${renderInline(m[2])}</div>`;
+    } else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flush();
+      html += "<hr>";
+    } else if (isTableRow(line) && TABLE_RULE.test(lines[i + 1] || "") && lines[i + 1].includes("-")) {
+      flush();
+      const rows = [];
+      let j = i + 2;
+      for (; j < lines.length && isTableRow(lines[j]); j++) rows.push(splitRow(lines[j]));
+      html += renderTable(splitRow(line), lines[i + 1], rows);
+      i = j - 1;
+    } else if ((m = line.match(/^\s*[-*•+]\s+(.*)$/))) {
+      addItem("ul", m[1]);
+    } else if ((m = line.match(/^\s*(\d+)[.)]\s+(.*)$/))) {
+      addItem("ol", m[2], +m[1]);
+    } else if (list && /^\s{2,}\S/.test(line)) {
+      list.items[list.items.length - 1] += " " + line.trim(); // wrapped list item
+    } else {
+      flushList();
+      para.push(line);
+    }
+  }
+  flush();
+  return html;
+}
+
+function renderMarkdown(text, caret = false) {
+  if (caret) text = text.trimEnd() + CARET;
   const parts = text.split(/```/);
-  return parts
+  const html = parts
     .map((part, i) => {
-      if (i % 2 === 1) {
-        const code = part.replace(/^[\w+-]*\n/, "");
-        return `<pre>${escapeHtml(code)}</pre>`;
-      }
-      if (i > 0) part = part.replace(/^\n/, "");
-      if (i < parts.length - 1) part = part.replace(/\n$/, "");
-      return escapeHtml(part)
-        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+      if (i % 2 === 1) return `<pre>${escapeHtml(part.replace(/^[\w+-]*\n/, ""))}</pre>`;
+      return renderBlocks(part);
     })
     .join("");
+  return html.replaceAll(CARET, '<span class="caret"></span>');
 }
 
 function addMessage(kind, text, label) {
@@ -56,7 +140,9 @@ function addMessage(kind, text, label) {
   wrap.innerHTML = `<span class="who"></span><div class="bubble"></div>`;
   wrap.querySelector(".who").textContent = label;
   const bubble = wrap.querySelector(".bubble");
-  if (text != null) bubble.innerHTML = renderMarkdownLite(text);
+  const markdown = kind.startsWith("bot");
+  bubble.classList.toggle("md", markdown);
+  if (text != null) bubble.innerHTML = markdown ? renderMarkdown(text) : escapeHtml(text);
   $("chat").appendChild(wrap);
   scrollChat();
   return wrap;
@@ -164,7 +250,7 @@ const handlers = {
 };
 
 function renderBubble(b) {
-  b.el.querySelector(".bubble").innerHTML = renderMarkdownLite(b.text);
+  b.el.querySelector(".bubble").innerHTML = renderMarkdown(b.text, b.el.classList.contains("streaming"));
   scrollChat();
 }
 
@@ -180,6 +266,7 @@ function finishReveal(b) {
 
 function closeBubble(id, b) {
   b.el.classList.remove("streaming");
+  if (b.text.trim()) renderBubble(b); // drop the typing cursor
   if (b.thoughts) endThoughts(b.thoughts);
   if (!b.text.trim()) {
     if (!b.thoughts?.body.textContent.trim()) b.el.remove();

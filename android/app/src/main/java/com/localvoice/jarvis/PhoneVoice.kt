@@ -84,6 +84,13 @@ class PhoneVoice(context: Context) : TextToSpeech.OnInitListener {
         /** Strip markdown so the phone voice doesn't read symbols out loud. */
         fun clean(raw: String): String {
             var s = raw.replace(Regex("```[\\s\\S]*?(```|$)"), " I've put the code on screen. ")
+            // Table separator rows and dividers ("|---|---|", "---"): nothing to say.
+            s = s.replace(Regex("(?m)^\\s*(?:\\|?[\\s:|-]*-{3,}[\\s:|-]*\\|?|[*_]{3,})\\s*$"), "")
+            // "| Flour | 2 cups |" -> "Flour, 2 cups." so table rows are read with pauses.
+            s = s.replace(Regex("(?m)^\\s*\\|(.*)\\|\\s*$")) { m ->
+                val cells = m.groupValues[1].split("|").map { it.trim() }.filter { it.isNotEmpty() }
+                if (cells.isEmpty()) "" else cells.joinToString(", ") + "."
+            }
             s = s.replace(Regex("`([^`]*)`"), "$1")
             s = s.replace(Regex("\\[([^\\]]+)]\\([^)]*\\)"), "$1")
             s = s.replace(Regex("[*_#>~|]+"), " ")
