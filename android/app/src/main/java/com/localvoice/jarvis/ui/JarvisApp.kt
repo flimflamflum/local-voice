@@ -5,7 +5,17 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -97,26 +107,37 @@ fun JarvisApp(vm: JarvisViewModel) {
                 .systemBarsPadding()
                 .imePadding()
         ) {
+            val voice = vm.prefs.voiceMode
             TopBar(vm)
             Chat(vm, Modifier.weight(1f))
-            val level by vm.level
-            Orb(
-                phase = vm.phase,
-                level = level,
-                onTap = vm::onOrbTap,
-                modifier = Modifier
-                    .size(if (vm.messages.isEmpty()) 260.dp else 150.dp)
-                    .align(Alignment.CenterHorizontally),
+            // Voice off: no orb at all, the chat gets the whole screen.
+            AnimatedVisibility(
+                visible = voice,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    val level by vm.level
+                    Orb(
+                        phase = vm.phase,
+                        level = level,
+                        onTap = vm::onOrbTap,
+                        modifier = Modifier.size(if (vm.messages.isEmpty()) 260.dp else 150.dp),
+                    )
+                    Text(
+                        phaseLabel(vm.phase),
+                        color = Muted,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(bottom = 10.dp),
+                    )
+                }
+            }
+            Composer(
+                placeholder = if (voice) "Type instead…" else "Message ${vm.assistantName}…",
+                busy = vm.phase in BusyPhases,
+                onSend = vm::sendText,
+                onStop = vm::stop,
             )
-            Text(
-                phaseLabel(vm.phase),
-                color = Muted,
-                fontSize = 13.sp,
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(bottom = 10.dp),
-            )
-            Composer(onSend = vm::sendText)
         }
 
         AnimatedVisibility(
@@ -140,37 +161,94 @@ private fun phaseLabel(p: Phase) = when (p) {
     Phase.Speaking -> "Speaking · tap to interrupt"
 }
 
+private val BusyPhases = setOf(Phase.Waiting, Phase.Thinking, Phase.Speaking)
+
 @Composable
 private fun TopBar(vm: JarvisViewModel) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(vm.assistantName, color = TextColor, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val dot = when (vm.phase) {
-                    Phase.Offline -> Bad
-                    Phase.Connecting -> Warn
-                    else -> Good
-                }
-                Box(
-                    Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(dot)
-                )
-                Spacer(Modifier.size(6.dp))
-                Text(vm.status, color = Muted, fontSize = 12.sp, maxLines = 1)
+        VoiceSwitch(on = vm.prefs.voiceMode, onChange = vm::setVoiceMode)
+        Spacer(Modifier.size(12.dp))
+        // Connection status; tap it to reconnect when offline.
+        val offline = vm.phase == Phase.Offline
+        Row(
+            Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(enabled = offline, onClick = vm::reconnect)
+                .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val dot = when (vm.phase) {
+                Phase.Offline -> Bad
+                Phase.Connecting -> Warn
+                else -> Good
             }
+            Box(
+                Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(dot)
+            )
+            Spacer(Modifier.size(6.dp))
+            Text(
+                if (offline && !vm.prefs.voiceMode) "${vm.status} · tap to retry" else vm.status,
+                color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
         }
         IconButton(onClick = vm::newChat) {
             Icon(JarvisIcons.Add, contentDescription = "New chat", tint = Muted)
         }
         IconButton(onClick = { vm.showSettings = true }) {
             Icon(JarvisIcons.Settings, contentDescription = "Settings", tint = Muted)
+        }
+    }
+}
+
+/** Voice mode on/off: a small pill with a mic (or chat bubble) and a mini switch. */
+@Composable
+private fun VoiceSwitch(on: Boolean, onChange: (Boolean) -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    val track by animateColorAsState(if (on) Accent else LineStrong, tween(200), label = "track")
+    val thumbX by animateDpAsState(if (on) 12.dp else 0.dp, tween(200), label = "thumb")
+    Row(
+        Modifier
+            .height(36.dp)
+            .clip(shape)
+            .background(Panel)
+            .border(1.dp, Line, shape)
+            .toggleable(value = on, role = SemanticsRole.Switch, onValueChange = onChange)
+            .semantics { contentDescription = "Voice mode" }
+            .padding(start = 10.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            if (on) JarvisIcons.Mic else JarvisIcons.Chat,
+            contentDescription = null,
+            tint = if (on) Accent else Muted,
+            modifier = Modifier.size(17.dp),
+        )
+        Spacer(Modifier.size(7.dp))
+        Text(if (on) "Voice" else "Text", color = if (on) TextColor else Muted, fontSize = 13.sp)
+        Spacer(Modifier.size(9.dp))
+        Box(
+            Modifier
+                .size(width = 30.dp, height = 18.dp)
+                .clip(CircleShape)
+                .background(track)
+                .padding(2.dp)
+        ) {
+            Box(
+                Modifier
+                    .offset(x = thumbX)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
         }
     }
 }
@@ -183,9 +261,11 @@ private fun Chat(vm: JarvisViewModel, modifier: Modifier) {
         if (vm.messages.isNotEmpty()) list.scrollToItem(vm.messages.size - 1)
     }
     if (vm.messages.isEmpty()) {
-        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
+        val voice = vm.prefs.voiceMode
+        Box(modifier.fillMaxWidth(), contentAlignment = if (voice) Alignment.BottomCenter else Alignment.Center) {
             Text(
-                "Your PC does the thinking.\nTap the orb and say hi.",
+                if (voice) "Your PC does the thinking.\nTap the orb and say hi."
+                else "Your PC does the thinking.\nType a message to start.",
                 color = Faint, fontSize = 14.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
@@ -318,9 +398,10 @@ private fun ThoughtsTab(m: ChatMsg) {
 }
 
 private val ThinkColor = Color(0xFFB18CFF)
+private val StopColor = Color(0xFFFF8A7A)
 
 @Composable
-private fun Composer(onSend: (String) -> Unit) {
+private fun Composer(placeholder: String, busy: Boolean, onSend: (String) -> Unit, onStop: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
     val send: () -> Unit = {
         if (text.isNotBlank()) {
@@ -337,7 +418,7 @@ private fun Composer(onSend: (String) -> Unit) {
         OutlinedTextField(
             value = text,
             onValueChange = { text = it },
-            placeholder = { Text("Type instead…", color = Faint) },
+            placeholder = { Text(placeholder, color = Faint) },
             maxLines = 4,
             shape = RoundedCornerShape(22.dp),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -345,8 +426,15 @@ private fun Composer(onSend: (String) -> Unit) {
             colors = fieldColors(),
             modifier = Modifier.weight(1f),
         )
-        IconButton(onClick = send, enabled = text.isNotBlank()) {
-            Icon(JarvisIcons.Send, contentDescription = "Send", tint = if (text.isNotBlank()) Accent else Faint)
+        if (busy && text.isBlank()) {
+            // While a reply is coming, the send button stops it.
+            IconButton(onClick = onStop) {
+                Icon(JarvisIcons.Stop, contentDescription = "Stop", tint = StopColor)
+            }
+        } else {
+            IconButton(onClick = send, enabled = text.isNotBlank()) {
+                Icon(JarvisIcons.Send, contentDescription = "Send", tint = if (text.isNotBlank()) Accent else Faint)
+            }
         }
     }
 }

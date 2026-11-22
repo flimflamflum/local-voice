@@ -19,6 +19,7 @@ data class Prefs(
     val style: String = "",
     val voice: String = "",
     val rate: Int = 1,
+    val voiceMode: Boolean = true,   // off = plain text chat: no orb, no mic, no audio
     val serverVoice: Boolean = true,
     val handsFree: Boolean = false,
     val think: Boolean = false,
@@ -35,6 +36,7 @@ class SettingsStore(private val context: Context) {
         val style = stringPreferencesKey("style")
         val voice = stringPreferencesKey("voice")
         val rate = intPreferencesKey("rate")
+        val voiceMode = booleanPreferencesKey("voice_mode")
         val serverVoice = booleanPreferencesKey("server_voice")
         val handsFree = booleanPreferencesKey("hands_free")
         val think = booleanPreferencesKey("think")
@@ -50,6 +52,7 @@ class SettingsStore(private val context: Context) {
             style = p[K.style] ?: "",
             voice = p[K.voice] ?: "",
             rate = p[K.rate] ?: 1,
+            voiceMode = p[K.voiceMode] ?: true,
             serverVoice = p[K.serverVoice] ?: true,
             handsFree = p[K.handsFree] ?: false,
             think = p[K.think] ?: false,
@@ -71,6 +74,7 @@ class SettingsStore(private val context: Context) {
             e[K.style] = prefs.style
             e[K.voice] = prefs.voice
             e[K.rate] = prefs.rate
+            e[K.voiceMode] = prefs.voiceMode
             e[K.serverVoice] = prefs.serverVoice
             e[K.handsFree] = prefs.handsFree
             e[K.think] = prefs.think

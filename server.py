@@ -1,4 +1,4 @@
-"""Jarvis phone server - lets the Android app talk to Jarvis from anywhere.
+"""Vesper phone server - lets the Android app talk to Vesper from anywhere.
 
 The phone streams your voice here; this PC transcribes it (Whisper), asks the
 model (Ollama) and voices the reply (Kokoro), then streams text + audio back.
@@ -131,7 +131,7 @@ class Conversation:
     async def handle(self, msg: dict):
         kind = msg.get("type")
         if kind == "audio_start":
-            self.interrupt()  # talking over Jarvis = barge in
+            self.interrupt()  # talking over the assistant = barge in
             self.audio = bytearray()
         elif kind == "audio_end":
             audio, self.audio = self.audio, None
@@ -335,7 +335,7 @@ async def ws_endpoint(ws: WebSocket):
     voices = await asyncio.wrap_future(SYNTH_POOL.submit(lambda: _tls.synth.voices()))
     await conv.send({"type": "welcome", "models": models, "voices": voices,
                      "styles": style_options(), "settings": settings,
-                     "name": SETTINGS.get("assistant_name") or "Jarvis"})
+                     "name": SETTINGS.get("assistant_name") or "Vesper"})
     try:
         while True:
             msg = await ws.receive()
@@ -358,13 +358,13 @@ async def ws_endpoint(ws: WebSocket):
 def main():
     SYNTH_POOL.submit(lambda: None)  # start the TTS thread (loads voices + Kokoro)
     port = CONFIG["port"]
-    print("\n  Jarvis phone server")
+    print("\n  Vesper phone server")
     print("  -------------------")
     for ip, label in local_addresses():
         print(f"  Address: {ip}:{port}   ({label})")
     print(f"  Token:   {CONFIG['token']}")
     print("\n  Easiest: open the desktop app > Settings > Phone and scan the QR code with the")
-    print("  Jarvis Android app. Or type the address and token into the app's settings.")
+    print("  Vesper Android app. Or type the address and token into the app's settings.")
     print("  Audio from the phone is never played on this PC.\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning", ws_ping_interval=20, ws_ping_timeout=20)
 

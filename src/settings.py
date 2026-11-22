@@ -12,12 +12,13 @@ DEFAULTS = {
     "rate": 1,                 # SAPI rate, -10..10
     "volume": 100,             # 0..100
     "speak_replies": True,
-    "hands_free": False,       # auto re-listen after Jarvis finishes talking
+    "voice_mode": True,        # off = plain text chat: no orb, no mic, nothing spoken
+    "hands_free": False,       # auto re-listen after the assistant finishes talking
     "think": False,            # let thinking models reason before answering (slower, smarter)
     "style": "playful",        # tone preset, see src/prompt.py STYLES
     "whisper_model": "base.en",
     "user_name": "",
-    "assistant_name": "Jarvis",
+    "assistant_name": "Vesper",
     "temperature": 0.8,
     "ollama_url": "http://127.0.0.1:11434",
 }
@@ -32,6 +33,8 @@ class Settings:
                 self._data.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig")))
             except (OSError, json.JSONDecodeError):
                 pass
+        if self._data.get("assistant_name") in ("", "Jarvis"):  # the app's old default name
+            self._data["assistant_name"] = DEFAULTS["assistant_name"]
 
     def get(self, key):
         with self._lock:

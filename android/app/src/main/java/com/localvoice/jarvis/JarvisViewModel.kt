@@ -52,7 +52,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var status by mutableStateOf("Not connected")
         private set
-    var assistantName by mutableStateOf("Jarvis")
+    var assistantName by mutableStateOf("Vesper")
         private set
     var models by mutableStateOf(listOf<String>())
         private set
@@ -76,8 +76,10 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private val phoneVoice = PhoneVoice(app)
 
     // ---------------------------------------------------------------- reply state
+    private enum class Output { PcVoice, PhoneVoice, Text }
+
     private var turnId = -1
-    private var turnUsesPcVoice = true
+    private var turnOutput = Output.PcVoice
     private var bubble: ChatMsg? = null
     private var shown = ""   // what the bubble shows right now
     private var target = ""  // everything that's been "spoken" so far
@@ -101,7 +103,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ================================================================ actions
-    /** Big orb: talk / send / interrupt depending on what Jarvis is doing. */
+    /** Big orb: talk / send / interrupt depending on what the assistant is doing. */
     fun onOrbTap() {
         when (phase) {
             Phase.Offline -> if (prefs.configured) connect() else showSettings = true
@@ -117,7 +119,28 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onMicPermission(granted: Boolean) {
         requestMic = false
-        if (granted) startListening() else info("Jarvis needs the microphone to hear you - or type below.")
+        if (granted) startListening() else info("$assistantName needs the microphone to hear you - or type below.")
+    }
+
+    /** Top-left switch. Off = plain text chat: orb and mic go away, the PC sends no audio. */
+    fun setVoiceMode(on: Boolean) {
+        if (on == prefs.voiceMode) return
+        if (!on) {
+            if (mic.active) mic.cancel()
+            if (bubble != null && turnOutput != Output.Text) interrupt() // stop talking right away
+        }
+        updatePrefs { it.copy(voiceMode = on) }
+    }
+
+    /** Stop button in the composer: cut the reply short. */
+    fun stop() {
+        if (mic.active) mic.cancel()
+        interrupt()
+        if (client.connected) phase = Phase.Idle
+    }
+
+    fun reconnect() {
+        if (prefs.configured) connect() else showSettings = true
     }
 
     fun sendText(text: String) {
@@ -162,7 +185,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
             null
         }
         if (parsed == null) {
-            status = "That QR code isn't a Jarvis link"
+            status = "That QR code isn't a $assistantName link"
             return false
         }
         showSettings = false
@@ -207,12 +230,12 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         if (p.style.isNotEmpty()) put("style", p.style)
         if (p.voice.isNotEmpty()) put("voice", p.voice)
         put("rate", p.rate)
-        put("server_voice", p.serverVoice)
+        put("server_voice", p.serverVoice && p.voiceMode) // text mode: no audio over the wire
         put("think", p.think)
     }
 
     private fun startListening() {
-        if (!client.connected || mic.active) return
+        if (!client.connected || mic.active || !prefs.voiceMode) return
         val granted = ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (!granted) {
@@ -245,7 +268,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Stop Jarvis talking (locally and on the PC). */
+    /** Stop the reply (locally and on the PC). */
     private fun interrupt() {
         client.send(JSONObject().put("type", "interrupt"))
         stopOutput()
@@ -280,7 +303,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         models = m.optJSONArray("models").strings()
         voices = m.optJSONArray("voices").pairs()
         styles = m.optJSONArray("styles").pairs()
-        assistantName = m.optString("name", "Jarvis").ifBlank { "Jarvis" }
+        assistantName = m.optString("name", "Vesper").ifBlank { "Vesper" }
         // Fill in anything not chosen on the phone with what the PC is using (not saved).
         val s = m.optJSONObject("settings") ?: JSONObject()
         prefs = prefs.copy(
@@ -308,7 +331,11 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
             "turn" -> {
                 cutBubble()
                 turnId = m.optInt("id")
-                turnUsesPcVoice = prefs.serverVoice
+                turnOutput = when {
+                    !prefs.voiceMode -> Output.Text
+                    prefs.serverVoice -> Output.PcVoice
+                    else -> Output.PhoneVoice
+                }
                 shown = ""
                 target = ""
                 bubble = add(Role.Jarvis, "", live = true)
@@ -327,8 +354,17 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
             "done" -> {
                 val id = m.optInt("id")
                 if (id != turnId) return
-                if (turnUsesPcVoice) player.mark(endOfReply = true) { finishTurn(id) }
-                else phoneVoice.mark { finishTurn(id) }
+                when (turnOutput) {
+                    Output.PcVoice -> player.mark(endOfReply = true) { finishTurn(id) }
+                    Output.PhoneVoice -> phoneVoice.mark { finishTurn(id) }
+                    Output.Text -> {
+                        val typing = revealJob
+                        viewModelScope.launch {
+                            typing?.join() // let the last bit finish typing out
+                            finishTurn(id)
+                        }
+                    }
+                }
             }
             "error" -> {
                 info(m.optString("message", "Something went wrong on the PC."))
@@ -341,8 +377,10 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         if (c.id != turnId) return
         val id = c.id
         when {
+            // Text mode: type each piece out quickly, no audio.
+            turnOutput == Output.Text -> onSpoken(id, c.text, (c.text.length * 0.012).coerceAtMost(1.2))
             c.pcm != null -> player.play(c.pcm, c.rate) { onSpoken(id, c.text, c.duration) }
-            !turnUsesPcVoice -> {
+            turnOutput == Output.PhoneVoice -> {
                 val clean = PhoneVoice.clean(c.text)
                 if (clean.isEmpty()) phoneVoice.mark { onSpoken(id, c.text, 0.0) }
                 else phoneVoice.speak(clean) {
@@ -392,7 +430,7 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
         turnId = -1
         level.floatValue = 0f
         phase = if (client.connected) Phase.Idle else Phase.Offline
-        if (prefs.handsFree && client.connected) startListening()
+        if (prefs.handsFree && prefs.voiceMode && client.connected) startListening()
     }
 
     /** Interrupted: keep only what was actually said. */

@@ -20,8 +20,11 @@ const PALETTE = {
   speaking:     [[255, 181, 71], [255, 107, 92]],
 };
 
+const DEFAULT_NAME = "Vesper";
+
 let api = null;
 let state = "idle";
+let voiceMode = true; // off = plain text chat: no orb, no mic, nothing spoken
 let micLevel = 0;
 let settings = {};
 const bubbles = new Map(); // turn id -> {el, text}
@@ -154,7 +157,7 @@ function scrollChat() {
 }
 
 function assistantLabel() {
-  return settings.assistant_name || "Jarvis";
+  return settings.assistant_name || DEFAULT_NAME;
 }
 
 // --------------------------------------------------------------- events
@@ -335,8 +338,28 @@ function prettyModel(name = "") {
 
 // -------------------------------------------------------------- controls
 function talk() {
-  api?.toggle_listen();
+  if (voiceMode) api?.toggle_listen();
 }
+
+// ------------------------------------------------------------ voice mode
+function applyVoiceMode(on) {
+  voiceMode = on;
+  body.classList.toggle("text-mode", !on);
+  $("voiceToggle").setAttribute("aria-checked", String(on));
+  $("voiceToggleLabel").textContent = on ? "Voice on" : "Voice off";
+  $("textInput").placeholder = on ? "…or type a message" : "Message " + assistantLabel();
+}
+
+function setVoiceMode(on) {
+  if (on === voiceMode) return;
+  applyVoiceMode(on);
+  save({ voice_mode: on });
+  if (!on) $("textInput").focus();
+  scrollChat();
+  toast(on ? "Voice on: talk or type" : "Voice off: text chat only");
+}
+
+$("voiceToggle").addEventListener("click", () => setVoiceMode(!voiceMode));
 function stopAll() {
   api?.stop();
 }
@@ -357,7 +380,10 @@ $("textForm").addEventListener("submit", (e) => {
   e.preventDefault();
   const input = $("textInput");
   const text = input.value.trim();
-  if (!text) return;
+  if (!text) {
+    if (state !== "idle") stopAll(); // the send button turns into stop while a reply is coming
+    return;
+  }
   input.value = "";
   api?.send_text(text);
 });
@@ -372,6 +398,9 @@ document.addEventListener("keydown", (e) => {
   } else if (e.code === "Space" && !typing && !e.repeat) {
     e.preventDefault();
     talk();
+  } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "v") {
+    e.preventDefault();
+    setVoiceMode(!voiceMode);
   } else if (e.ctrlKey && e.key.toLowerCase() === "n") {
     e.preventDefault();
     newChat();
@@ -480,8 +509,8 @@ function bindSettings() {
   $("whisperSelect").addEventListener("change", (e) => save({ whisper_model: e.target.value }));
   $("userName").addEventListener("change", (e) => save({ user_name: e.target.value.trim() }));
   $("assistantName").addEventListener("change", (e) => {
-    const name = e.target.value.trim() || "Jarvis";
-    save({ assistant_name: name });
+    const name = e.target.value.trim() || DEFAULT_NAME;
+    save({ assistant_name: name }).then(() => applyVoiceMode(voiceMode));
     $("brandName").textContent = name.toUpperCase();
   });
   $("testVoice").addEventListener("click", () => api?.test_voice());
@@ -508,8 +537,9 @@ function applySettings(s, models, voices, styles) {
   $("thinkMode").checked = !!s.think;
   $("whisperSelect").value = s.whisper_model;
   $("userName").value = s.user_name || "";
-  $("assistantName").value = s.assistant_name || "Jarvis";
-  $("brandName").textContent = (s.assistant_name || "Jarvis").toUpperCase();
+  $("assistantName").value = s.assistant_name || DEFAULT_NAME;
+  $("brandName").textContent = (s.assistant_name || DEFAULT_NAME).toUpperCase();
+  applyVoiceMode(s.voice_mode !== false);
 }
 
 async function boot() {
@@ -569,6 +599,7 @@ function blobPath(cx, cy, R, amp, t, seed) {
 }
 
 function frame(now) {
+  if (!voiceMode) return requestAnimationFrame(frame); // orb hidden: don't spend GPU on it
   const t = now / 1000;
   const [tc, te] = PALETTE[state] || PALETTE.idle;
   for (let i = 0; i < 3; i++) {

@@ -25,7 +25,9 @@ if (-not (Test-Path ui\jarvis.ico)) { .\.venv\Scripts\python.exe tools\make_icon
 
 if ($Shortcut) {
     $root = (Get-Location).Path
-    $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Jarvis.lnk'
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    Remove-Item (Join-Path $desktop 'Jarvis.lnk') -ErrorAction SilentlyContinue  # the app's old name
+    $lnkPath = Join-Path $desktop 'Vesper.lnk'
     $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
     $lnk.TargetPath = Join-Path $root '.venv\Scripts\pythonw.exe'
     $lnk.Arguments = '"' + (Join-Path $root 'app.py') + '"'
@@ -38,4 +40,4 @@ if ($Shortcut) {
     Write-Host "Desktop shortcut created."
 }
 
-Write-Host "`nDone. Make sure Ollama is running, then launch Jarvis.bat"
+Write-Host "`nDone. Make sure Ollama is running, then launch Vesper.bat"

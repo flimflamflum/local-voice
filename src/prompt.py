@@ -92,7 +92,7 @@ def build_system_prompt(assistant_name: str, user_name: str, style: str = DEFAUL
     user_name = (user_name or "").strip()
     return SYSTEM_PROMPT.format(
         style=tone,
-        assistant=assistant_name or "Jarvis",
+        assistant=assistant_name or "Vesper",
         user_ref=f"{user_name}'s" if user_name else "the user's",
         now=datetime.now().strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " "),
         user_line=(

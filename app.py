@@ -1,6 +1,6 @@
-"""Jarvis - voice chat with your local Ollama models.
+"""Vesper - voice (or text) chat with your local Ollama models.
 
-Run:  .venv\\Scripts\\pythonw.exe app.py   (or double-click Jarvis.bat)
+Run:  .venv\\Scripts\\pythonw.exe app.py   (or double-click Vesper.bat)
 """
 import json
 import os
@@ -76,6 +76,8 @@ class Api:
         }
 
     def toggle_listen(self):
+        if not self._settings.get("voice_mode"):
+            return
         if self._recorder.active:
             self._recorder.stop()
             return
@@ -103,6 +105,9 @@ class Api:
 
     def set_settings(self, changes):
         old_model = self._settings.get("model")
+        if changes.get("voice_mode") is False and (self._recorder.active or self._speaker.busy):
+            self._interrupt()  # switched to text: stop listening / talking right away
+            self._set_state("idle")
         data = self._settings.update(changes or {})
         if {"voice", "rate", "volume"} & set(changes):
             self._speaker.configure(
@@ -195,7 +200,7 @@ class Api:
         if self._model_switch is not None:
             self._model_switch.join(timeout=120)  # old model out before we ask the new one
         self._emit("assistant_start", gen)
-        speak = s.get("speak_replies")
+        speak = s.get("voice_mode") and s.get("speak_replies")
         model = s.get("model")
         # Reasoning goes to the collapsible "See thinking" panel, never into the reply.
         thoughts = ThoughtStream(
@@ -297,7 +302,8 @@ class Api:
             self._maybe_hands_free(self._gen)
 
     def _maybe_hands_free(self, gen):
-        if self._settings.get("hands_free") and gen == self._gen and not self._recorder.active:
+        s = self._settings
+        if s.get("voice_mode") and s.get("hands_free") and gen == self._gen and not self._recorder.active:
             threading.Thread(target=self._listen_turn, args=(gen,), daemon=True).start()
 
     def _watch_whisper(self):
@@ -356,7 +362,7 @@ def main():
         pass
     api = Api()
     window = webview.create_window(
-        "Jarvis",
+        "Vesper",
         str(ROOT / "ui" / "index.html"),
         js_api=api,
         width=1120,

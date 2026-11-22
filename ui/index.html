@@ -3,17 +3,24 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Jarvis</title>
+  <title>Vesper</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body data-state="idle">
   <div class="bg-glow"></div>
 
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-dot"></span>
-      <span class="brand-name" id="brandName">JARVIS</span>
-      <span class="brand-sub">local voice</span>
+    <div class="top-left">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name" id="brandName">VESPER</span>
+      </div>
+      <button class="voice-toggle" id="voiceToggle" role="switch" aria-checked="true" title="Voice mode (Ctrl+Shift+V)">
+        <svg viewBox="0 0 24 24" class="ico vt-mic"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 1 0-7 0v5A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.9V20H8.5a1 1 0 1 0 0 2h7a1 1 0 1 0 0-2H13v-2.6a6 6 0 0 0 5-5.9Z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico vt-chat"><path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9.5L5 20.5V17a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2.5 5a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4Zm4.5 0a1.2 1.2 0 1 0 0 2.4A1.2 1.2 0 0 0 12 9Zm4.5 0a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 0 0 0-2.4Z"/></svg>
+        <span class="vt-label" id="voiceToggleLabel">Voice on</span>
+        <span class="vt-track"><span class="vt-thumb"></span></span>
+      </button>
     </div>
     <div class="top-actions">
       <label class="pill select-pill" title="Model">
@@ -57,7 +64,8 @@
     <form class="input-wrap" id="textForm" autocomplete="off">
       <input id="textInput" placeholder="…or type a message" />
       <button type="submit" class="send-btn" title="Send">
-        <svg viewBox="0 0 24 24" class="ico"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico ico-send"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico ico-stop"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
       </button>
     </form>
     <button class="mic-btn" id="micBtn" title="Talk (Space)">
@@ -76,11 +84,11 @@
 
     <div class="field">
       <label for="userName">Your name</label>
-      <input id="userName" placeholder="So Jarvis knows who's boss" />
+      <input id="userName" placeholder="So Vesper knows who's boss" />
     </div>
     <div class="field">
       <label for="assistantName">Assistant name</label>
-      <input id="assistantName" placeholder="Jarvis" />
+      <input id="assistantName" placeholder="Vesper" />
     </div>
 
     <div class="section-title">Voice</div>
@@ -132,7 +140,7 @@
     <div class="section-title">Phone</div>
     <div class="phone-link">
       <div class="qr" id="qrBox"></div>
-      <p class="phone-hint">In the Jarvis Android app, tap <b>Scan QR code</b> in Settings.</p>
+      <p class="phone-hint">In the Vesper Android app, tap <b>Scan QR code</b> in Settings.</p>
       <div class="field">
         <label for="hostSelect">Address in the code</label>
         <select id="hostSelect"></select>
@@ -144,7 +152,7 @@
     </div>
 
     <div class="drawer-foot">
-      <kbd>Space</kbd> talk / stop talking &nbsp;·&nbsp; <kbd>Esc</kbd> shut up &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>N</kbd> new chat
+      <kbd>Space</kbd> talk / stop talking &nbsp;·&nbsp; <kbd>Esc</kbd> shut up &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>N</kbd> new chat &nbsp;·&nbsp; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> voice on/off
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>

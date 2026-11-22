@@ -1,6 +1,6 @@
 # local-voice
 
-**Jarvis** is a fully offline voice assistant for Windows that lets you talk to your local [Ollama](https://ollama.com) models. You speak, Whisper transcribes, your model answers, and a Kokoro neural voice reads the reply back while the text types out in sync with the speech.
+**Vesper** is a fully offline voice assistant for Windows that lets you talk to your local [Ollama](https://ollama.com) models. You speak, Whisper transcribes, your model answers, and a Kokoro neural voice reads the reply back while the text types out in sync with the speech.
 
 Nothing leaves your machine.
 
@@ -22,10 +22,12 @@ The script:
 - downloads the Kokoro voice model (about 115 MB, into `models/`)
 - creates a desktop shortcut, if you pass `-Shortcut`
 
-The Whisper speech model (about 145 MB) downloads automatically the first time you run Jarvis.
+The Whisper speech model (about 145 MB) downloads automatically the first time you run Vesper.
 
 ## Run
-Double-click **`Jarvis.bat`** or the desktop shortcut.
+Double-click **`Vesper.bat`** or the desktop shortcut.
+
+(If you set the app up back when it was called Jarvis, run `setup.ps1 -Shortcut` again to swap the old desktop shortcut for a Vesper one.)
 
 ## Controls
 | | |
@@ -34,6 +36,7 @@ Double-click **`Jarvis.bat`** or the desktop shortcut.
 | `Space` while it's talking | Interrupt and talk |
 | `Esc` / stop button | Shut it up |
 | `Ctrl+N` | New chat (clears memory) |
+| `Ctrl+Shift+V` / **Voice** switch (top left) | Voice mode on/off. Off turns the app into a plain text chat: the orb and mic disappear and nothing is spoken |
 
 The settings (gear icon) cover:
 - the model
@@ -52,12 +55,12 @@ Each personality is a short tone prompt placed at the start of the system prompt
 | `src/llm.py` | Streams from Ollama's `/api/chat`. Thinking is off unless you turn on **Think before answering** in Settings; the reasoning then appears under a collapsed **See thinking** tab above the reply and is never spoken. When you switch models, it unloads the old one first |
 | `src/textutil.py` | Splits the stream into speakable sentences or clauses, strips markdown and emoji for speech |
 | `src/tts.py` | **Kokoro** (neural, ONNX) or Windows SAPI voices. Synthesis runs ahead of playback, and everything plays through one continuous audio stream so there are no gaps between sentences |
-| `src/prompt.py` | The personality and voice-friendly rules. Edit it to change how Jarvis talks |
+| `src/prompt.py` | The personality and voice-friendly rules. Edit it to change how Vesper talks |
 | `ui/` | The interface (HTML/CSS/JS in a pywebview window) |
 | `server.py` | The phone server. It does the same speech-to-text, Ollama and Kokoro work, then streams the text and audio to the Android app. It never plays sound on the PC |
 | `android/` | The Android app (Kotlin + Jetpack Compose) |
 
-## Talk to Jarvis from your phone (Android)
+## Talk to Vesper from your phone (Android)
 Your PC does all the work: Whisper, the LLM and the Kokoro voice. The phone only records your voice and plays back the reply. The app is about 2 MB and needs no models.
 
 **1. Build the app.** Open the `android/` folder in Android Studio, let Gradle sync, then use **Run** (phone plugged in with USB debugging on) or **Build → Generate App Bundles or APKs → Build APK(s)**.
@@ -73,8 +76,9 @@ Then, in the Android app, tap **Settings → Scan QR code** and point the phone 
 
 **In the app**
 - Tap the orb to talk. It stops listening when you go quiet, or tap again to send right away.
-- Tap the orb while Jarvis is talking to interrupt him.
+- Tap the orb while Vesper is talking to interrupt.
 - You can type instead.
+- The **Voice** switch in the top left turns voice mode off: the orb goes away, the chat fills the screen, and replies arrive as text only (no audio is sent). The send button becomes a stop button while a reply is coming.
 - Settings cover:
   - model, personality, voice, speed
   - **Hands-free**: keeps listening after each reply

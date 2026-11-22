@@ -34,7 +34,7 @@ private fun tintFor(phase: Phase) = when (phase) {
     Phase.Transcribing, Phase.Waiting, Phase.Thinking -> Accent2
 }
 
-/** The glowing Jarvis orb. It breathes when idle, swells with your voice and with Jarvis's. */
+/** The glowing orb. It breathes when idle, swells with your voice and with the assistant's. */
 @Composable
 fun Orb(phase: Phase, level: Float, onTap: () -> Unit, modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "orb")
@@ -53,7 +53,7 @@ fun Orb(phase: Phase, level: Float, onTap: () -> Unit, modifier: Modifier = Modi
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
             role = Role.Button,
-            onClickLabel = "Talk to Jarvis",
+            onClickLabel = "Talk",
             onClick = onTap,
         )
     ) {

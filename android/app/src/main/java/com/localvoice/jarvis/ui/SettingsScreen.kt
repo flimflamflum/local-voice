@@ -95,7 +95,7 @@ fun SettingsScreen(vm: JarvisViewModel) {
             ) { Text("Scan QR code", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
             Gap(6)
             Text(
-                "On your PC: Jarvis desktop app → Settings → Phone. Or type it in:",
+                "On your PC: Vesper desktop app → Settings → Phone. Or type it in:",
                 color = Faint, fontSize = 12.sp, lineHeight = 17.sp,
             )
             Gap(10)
@@ -133,12 +133,12 @@ fun SettingsScreen(vm: JarvisViewModel) {
             Text(
                 "The phone server has to be running on your PC: start it from the desktop app's " +
                     "Phone settings, or run run-server.bat. Pick the Tailscale address (starts with 100.) " +
-                    "to talk to Jarvis from anywhere.",
+                    "to talk to Vesper from anywhere.",
                 color = Faint, fontSize = 12.sp, lineHeight = 17.sp,
             )
 
             // ------------------------------------------------------------ brain
-            SectionTitle("Jarvis")
+            SectionTitle("Assistant")
             Picker("Model", vm.models.map { it to it }, p.model) { id -> vm.updatePrefs { it.copy(model = id) } }
             Gap()
             Picker("Personality", vm.styles, p.style) { id -> vm.updatePrefs { it.copy(style = id) } }
