@@ -15,8 +15,10 @@ DEFAULTS = {
     "voice_mode": True,        # off = plain text chat: no orb, no mic, nothing spoken
     "hands_free": False,       # auto re-listen after the assistant finishes talking
     "think": False,            # let thinking models reason before answering (slower, smarter)
+    "think_effort": "medium",  # how long it may think: low / medium / high / max (src/llm.py THINK_EFFORT)
     "web_search": False,       # let the model search the web (DuckDuckGo) when it needs to
-    "app_mode": "chat",        # "chat" = the voice assistant, "code" = Vesper Code
+    "app_mode": "chat",        # "chat" = the voice assistant, "code" = Vesper Code, "sandbox" = Sandbox
+    "sandbox": {},             # Sandbox settings (system prompt, sampling...), see src/sandbox.py DEFAULTS
     "code_folder": "",         # the folder Vesper Code works in
     "code_auto_edits": False,  # Vesper Code: apply file edits without asking each time
     "style": "playful",        # tone preset, see src/prompt.py STYLES
@@ -24,6 +26,7 @@ DEFAULTS = {
     "user_name": "",
     "assistant_name": "Vesper",
     "temperature": 0.8,
+    "num_ctx": 8192,           # context window in tokens (Settings > Model)
     "ollama_url": "http://127.0.0.1:11434",
 }
 

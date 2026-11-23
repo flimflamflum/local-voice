@@ -31,10 +31,11 @@ let state = "idle";
 let voiceMode = true; // off = plain text chat: no orb, no mic, nothing spoken
 let webSearch = false; // on = the model may search the web before answering
 let searchQuery = ""; // what it's searching for right now (shown under the orb)
-let appMode = "chat"; // "chat" = voice assistant, "code" = Vesper Code
+let appMode = "chat"; // "chat" = voice assistant, "code" = Vesper Code, "sandbox" = Sandbox
 let codeFolder = null; // {path, name} of the folder Vesper Code works in
 let micLevel = 0;
 let settings = {};
+const ctxUsed = { chat: 0, code: 0, sandbox: 0 }; // tokens in the context after the last request, per mode
 const bubbles = new Map(); // turn id -> {el, text}
 const replyEls = new Map(); // turn id -> its message element, kept so stats can land after it closes
 
@@ -146,11 +147,11 @@ function renderMarkdown(text, caret = false) {
 }
 
 function activeChat() {
-  return appMode === "code" ? $("codeChat") : $("chat");
+  return appMode === "code" ? $("codeChat") : appMode === "sandbox" ? $("sbChat") : $("chat");
 }
 
 function addMessage(kind, text, label, container = $("chat")) {
-  container.querySelector(".empty, .code-empty")?.remove();
+  container.querySelector(".empty, .code-empty, .sb-empty")?.remove();
   const wrap = document.createElement("div");
   wrap.className = `msg ${kind}`;
   wrap.innerHTML = `<span class="who"></span><div class="bubble"></div>`;
@@ -200,10 +201,15 @@ const handlers = {
   },
   // Token count and time for a finished reply. While the reply is still being spoken,
   // hold on to it until the bubble closes.
+  // How full the context window is, after each request the model finishes.
+  ctx({ used, mode }) {
+    ctxUsed[mode in ctxUsed ? mode : "chat"] = used;
+    renderCtxMeter();
+  },
   stats(st) {
     const b = bubbles.get(st.id);
     if (b) b.stats = st;
-    else showStats(replyEls.get(st.id), st);
+    else showStats(replyEls.get(st.id) || codeTurnEls.get(st.id), st);
     replyEls.delete(st.id);
   },
   token({ id, t }) {
@@ -283,6 +289,7 @@ const handlers = {
   // Interrupted: keep only what was actually said.
   assistant_cut(id) {
     if (codeTurns.has(id)) return endCodeTurn(id, "Stopped.");
+    if (sb.turns.has(id)) return; // its sb_done follows, with "Stopped by you"
     const b = bubbles.get(id);
     if (!b) return;
     clearTimeout(b.timer);
@@ -477,8 +484,8 @@ function fmtSecs(s) {
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
-// "312 tokens · responded in 4.2s" under a reply; hover for speed and context use.
-function showStats(el, { tokens, prompt, secs, ctx }) {
+// "312 tokens · responded in 4.2s" under a reply; hover for speed and prompt size.
+function showStats(el, { tokens, prompt, secs }) {
   if (!el?.isConnected || el.querySelector(".reply-stats")) return;
   const line = document.createElement("div");
   line.className = "reply-stats";
@@ -486,7 +493,8 @@ function showStats(el, { tokens, prompt, secs, ctx }) {
   line.textContent = `${n} token${tokens === 1 ? "" : "s"} · responded in ${fmtSecs(secs)}`;
   const tips = [];
   if (secs > 0 && tokens) tips.push(`${(tokens / secs).toFixed(1)} tokens/s overall`);
-  if (prompt) tips.push(`${prompt.toLocaleString()} prompt tokens read (context: ${ctx.toLocaleString()})`);
+  // Summed over every request the reply made (a web search or thinking cut-off adds one).
+  if (prompt) tips.push(`${prompt.toLocaleString()} prompt tokens read`);
   line.title = tips.join("\n");
   el.appendChild(line);
   scrollChat();
@@ -607,6 +615,10 @@ function codeEmptyState() {
 }
 
 function applyFolder(info) {
+  if (info?.path !== codeFolder?.path) {
+    ctxUsed.code = 0; // a new folder starts a new Vesper Code conversation
+    renderCtxMeter();
+  }
   codeFolder = info || null;
   $("folderName").textContent = codeFolder ? codeFolder.name : "Choose a folder";
   $("folderPath").textContent = codeFolder ? codeFolder.path : "";
@@ -628,13 +640,16 @@ async function chooseFolder() {
 }
 
 function applyMode(mode) {
-  appMode = mode === "code" ? "code" : "chat";
+  appMode = ["code", "sandbox"].includes(mode) ? mode : "chat";
   body.classList.toggle("code-mode", appMode === "code");
+  body.classList.toggle("sandbox-mode", appMode === "sandbox");
+  if (appMode === "sandbox") loadSbModel();
   for (const b of document.querySelectorAll("#modeSwitch button")) {
     b.setAttribute("aria-selected", String(b.dataset.mode === appMode));
   }
   updateComposer();
   scrollChat();
+  renderCtxMeter();
 }
 
 function setMode(mode) {
@@ -649,6 +664,9 @@ function updateComposer() {
   if (appMode === "code") {
     input.disabled = !codeFolder;
     input.placeholder = codeFolder ? `Ask ${assistantLabel()} Code to build, fix or explain something…` : "Choose a folder first";
+  } else if (appMode === "sandbox") {
+    input.disabled = false;
+    input.placeholder = "Message the model with the settings on the left";
   } else {
     input.disabled = false;
     input.placeholder = voiceMode ? "…or type a message" : "Message " + assistantLabel();
@@ -771,6 +789,14 @@ $("stopBtn").addEventListener("click", stopAll);
 $("newChatBtn").addEventListener("click", newChat);
 
 function newChat() {
+  ctxUsed[appMode] = 0;
+  renderCtxMeter();
+  if (appMode === "sandbox") {
+    api?.sandbox_new();
+    sbDone.clear();
+    sbEmptyState();
+    return;
+  }
   if (appMode === "code") {
     api?.code_new();
     codeTurns.clear();
@@ -800,6 +826,8 @@ $("textForm").addEventListener("submit", (e) => {
     if (!codeFolder) return chooseFolder();
     addMessage("user", text, "You", $("codeChat"));
     api?.code_send(text);
+  } else if (appMode === "sandbox") {
+    sbSend(text);
   } else {
     api?.send_text(text);
   }
@@ -882,6 +910,15 @@ $("startServer").addEventListener("click", async () => {
   refreshPhone();
 });
 $("settingsBtn").addEventListener("click", openDrawer);
+$("ctxMeter").addEventListener("click", () => {
+  if (appMode === "sandbox") {
+    const field = document.querySelector('.sb-field[data-key="num_ctx"]');
+    field.closest("details").open = true;
+    return field.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  openDrawer();
+  setTimeout(() => $("ctxField").scrollIntoView({ block: "center", behavior: "smooth" }), 250);
+});
 $("closeDrawer").addEventListener("click", closeDrawer);
 $("scrim").addEventListener("click", closeDrawer);
 
@@ -903,7 +940,7 @@ function fillSelect(sel, values, current, labelFn = (v) => v) {
 
 function bindSettings() {
   $("modelSelect").addEventListener("change", (e) => {
-    save({ model: e.target.value });
+    save({ model: e.target.value }).then(() => appMode === "sandbox" && loadSbModel());
     toast(`Switched to ${prettyModel(e.target.value)}`);
   });
   $("voiceSelect").addEventListener("change", (e) => save({ voice: e.target.value }));
@@ -917,9 +954,22 @@ function bindSettings() {
   $("rate").addEventListener("change", (e) => save({ rate: +e.target.value }));
   $("volume").addEventListener("input", (e) => ($("volumeVal").textContent = e.target.value + "%"));
   $("volume").addEventListener("change", (e) => save({ volume: +e.target.value }));
+  $("effortSlider").addEventListener("input", (e) => showEffort(+e.target.value, $("thinkMode").checked));
+  $("effortSlider").addEventListener("change", (e) => {
+    const effort = EFFORTS[+e.target.value];
+    save({ think_effort: effort.id });
+    toast(`Thinking effort: ${effort.label}`);
+  });
+  $("ctxSlider").addEventListener("input", (e) => showCtx(CTX_STOPS[+e.target.value]));
+  $("ctxSlider").addEventListener("change", (e) => {
+    const tokens = CTX_STOPS[+e.target.value];
+    save({ num_ctx: tokens }).then(renderCtxMeter);
+    toast(`Context: ${tokens / 1024}k tokens. Reloading the model…`);
+  });
   $("speakReplies").addEventListener("change", (e) => save({ speak_replies: e.target.checked }));
   $("thinkMode").addEventListener("change", (e) => {
     save({ think: e.target.checked });
+    showEffort(+$("effortSlider").value, e.target.checked);
     toast(e.target.checked ? "Thinking on: smarter answers, slower to start" : "Thinking off: instant answers");
   });
   $("handsFree").addEventListener("change", (e) => {
@@ -934,6 +984,65 @@ function bindSettings() {
     $("brandName").textContent = name.toUpperCase();
   });
   $("testVoice").addEventListener("click", () => api?.test_voice());
+}
+
+// Context window stops (tokens). Up to 12k fits a laptop RTX 3050's 4 GB of VRAM with the 4B
+// model at full speed (measured: 43 tok/s at 4k, 8k and 12k); 16k no longer fits on the GPU.
+const CTX_STOPS = [2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 65536];
+const CTX_RECOMMENDED = 12288;
+
+function ctxIndex(tokens) {
+  const i = CTX_STOPS.findIndex((t) => t >= tokens);
+  return i < 0 ? CTX_STOPS.length - 1 : i;
+}
+
+function showCtx(tokens) {
+  const over = tokens > CTX_RECOMMENDED;
+  $("ctxField").classList.toggle("over", over);
+  $("ctxVal").textContent = `${tokens / 1024}k tokens`;
+  $("ctxNote").textContent = over
+    ? `⚠ Over ${CTX_RECOMMENDED / 1024}k won't fit in your RTX 3050's 4 GB of VRAM. Part of the model moves to the CPU, so replies get 2–3× slower, and it may fail to load.`
+    : "How much of the conversation the model can see at once. Up to 12k runs at full speed on your GPU.";
+}
+
+// Thinking effort = how long the model may think before it has to answer (src/llm.py THINK_EFFORT).
+const EFFORTS = [
+  { id: "low", label: "Low", note: "A quick look before answering. Up to ~600 tokens or 20 s." },
+  { id: "medium", label: "Medium", note: "Balanced. Up to ~2,000 tokens or 45 s." },
+  { id: "high", label: "High", note: "Thinks it through. Up to ~5,000 tokens or 2 min." },
+  { id: "max", label: "Max", note: "As long as it needs, up to 5 min. Capped at 60% of the context window, so raise that too." },
+];
+
+function effortIndex(id) {
+  const i = EFFORTS.findIndex((e) => e.id === id);
+  return i < 0 ? 1 : i;
+}
+
+function showEffort(i, thinkOn) {
+  $("effortVal").textContent = EFFORTS[i].label;
+  $("effortNote").textContent = thinkOn ? EFFORTS[i].note : "Turn on \"Think before answering\" to use this.";
+  $("effortField").classList.toggle("off", !thinkOn);
+}
+
+// Top bar meter: how much of the context window the current conversation fills.
+function fmtTokens(n) {
+  return n < 1000 ? `${n}` : `${+(n / 1024).toFixed(n < 10240 ? 1 : 0)}k`;
+}
+
+function renderCtxMeter() {
+  const max = (appMode === "sandbox" ? sb.cfg.num_ctx : settings.num_ctx) || 8192;
+  const used = Math.min(ctxUsed[appMode] || 0, max);
+  const pct = Math.round((used / max) * 100);
+  const level = pct >= 90 ? "full" : pct >= 70 ? "high" : "";
+  $("ctxMeter").dataset.level = level;
+  $("ctxMeterFill").style.width = `${Math.max(pct, used ? 2 : 0)}%`;
+  $("ctxMeterText").textContent = `${fmtTokens(used)} / ${fmtTokens(max)}`;
+  $("ctxMeter").title =
+    `Context window: ${used.toLocaleString()} of ${max.toLocaleString()} tokens used (${pct}%).
+` +
+    (level === "full"
+      ? "Nearly full: the oldest messages are being dropped. Start a new chat, or raise the context window in Settings."
+      : "As it fills up, the oldest messages get dropped. Click to change the size.");
 }
 
 function fmtSigned(v) {
@@ -952,9 +1061,13 @@ function applySettings(s, models, voices, styles) {
   $("rateVal").textContent = fmtSigned(s.rate);
   $("volume").value = s.volume;
   $("volumeVal").textContent = s.volume + "%";
+  $("ctxSlider").value = ctxIndex(s.num_ctx || 8192);
+  showCtx(CTX_STOPS[ctxIndex(s.num_ctx || 8192)]);
   $("speakReplies").checked = s.speak_replies;
   $("handsFree").checked = s.hands_free;
   $("thinkMode").checked = !!s.think;
+  $("effortSlider").value = effortIndex(s.think_effort);
+  showEffort(effortIndex(s.think_effort), !!s.think);
   $("whisperSelect").value = s.whisper_model;
   $("userName").value = s.user_name || "";
   $("assistantName").value = s.assistant_name || DEFAULT_NAME;
@@ -963,6 +1076,545 @@ function applySettings(s, models, voices, styles) {
   applyWebSearch(!!s.web_search);
   $("codeAutoEdits").checked = !!s.code_auto_edits;
   applyMode(s.app_mode);
+  renderCtxMeter();
+}
+
+// ================================================================ Sandbox
+// A plain text chat with every knob exposed. Settings on the left go out with the next message;
+// each reply shows what was sent, how long it took, why it stopped and how sure the model was.
+const sb = { cfg: {}, defaults: {}, presets: [], info: null, turns: new Map(), saveTimer: null };
+
+const r2 = (v) => Math.round(v * 100) / 100;
+const SB_FIELDS = {
+  think_budget: {
+    label: "Thinking budget", stops: [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 0],
+    fmt: (v) => (v ? `${fmtTokens(v)} tokens` : "No limit"),
+    help: "The most tokens it may think for. A model can't limit its own thinking, so this app counts the tokens, cuts it off, and asks for an answer from its notes so far.",
+  },
+  temperature: {
+    label: "Temperature", min: 0, max: 2, step: 0.05, fmt: (v) => v.toFixed(2),
+    help: "At every step the model gives each possible next token a probability, then one is picked at random. Temperature reshapes those odds first.",
+    explain: (v) => v === 0 ? "0 = always the single likeliest token: same question, same answer."
+      : v < 0.5 ? "Low: sticks to safe, likely tokens. Focused, a bit repetitive."
+      : v <= 1 ? "Balanced: mostly likely tokens, the odd surprise."
+      : v <= 1.4 ? "High: takes chances. More creative, more mistakes."
+      : "Very high: unlikely tokens win all the time. Expect gibberish.",
+  },
+  top_p: {
+    label: "Top P", min: 0.05, max: 1, step: 0.01, fmt: (v) => v.toFixed(2),
+    help: "Keeps the likeliest tokens until their probabilities add up to this, and throws away the long tail of unlikely ones.",
+    explain: (v) => (v >= 1 ? "1 = off: every token stays in the running." : `Keeps the top ${Math.round(v * 100)}% of the probability, drops the rest.`),
+  },
+  top_k: {
+    label: "Top K", min: 1, max: 100, step: 1, fmt: (v) => `${v}`,
+    help: "Only the K likeliest next tokens are allowed.",
+    explain: (v) => (v === 1 ? "1 = only the favourite, so temperature stops mattering." : `It picks among the ${v} likeliest tokens.`),
+  },
+  min_p: {
+    label: "Min P", min: 0, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2),
+    help: "Drops any token that's less likely than this fraction of the favourite.",
+    explain: (v) => (v === 0 ? "0 = off." : `A token must be at least ${Math.round(v * 100)}% as likely as the favourite.`),
+  },
+  repeat_penalty: {
+    label: "Repeat penalty", min: 0.8, max: 2, step: 0.05, fmt: (v) => v.toFixed(2),
+    help: "Makes tokens it used in the last 64 less likely, so it doesn't go round in circles.",
+    explain: (v) => v === 1 ? "1 = off."
+      : v < 1 ? "Below 1 actually rewards repeating itself."
+      : v > 1.5 ? "Strong: it starts dodging ordinary words like “the”."
+      : "Gently discourages repeating.",
+  },
+  presence_penalty: {
+    label: "Presence penalty", min: 0, max: 2, step: 0.1, fmt: (v) => v.toFixed(1),
+    help: "A flat penalty on every token that has appeared at all, pushing it toward new words and topics.",
+    explain: (v) => (v === 0 ? "0 = off." : "Higher = more new words, less sticking to the point."),
+  },
+  num_predict: {
+    label: "Max reply length", stops: [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, -1],
+    fmt: (v) => (v < 0 ? "No limit" : `${v.toLocaleString()} tokens`),
+    help: "A hard cap on the reply. A token is a word or a piece of one (an English word is about 1.3 tokens). It stops mid-sentence when it hits this.",
+  },
+  num_ctx: {
+    label: "Context window", stops: CTX_STOPS, fmt: (v) => `${v / 1024}k tokens`,
+    help: "Everything the model can see at once: system prompt, chat history and its own reply. When it's full the oldest messages fall out. Changing it reloads the model.",
+    explain: (v) => (v > CTX_RECOMMENDED ? "⚠ Over 12k won't fit in your GPU's 4 GB, so replies get 2–3× slower." : ""),
+  },
+  memory: {
+    label: "Memory", stops: [0, 1, 2, 3, 4, 5, 6, 8, 10, 15, -1],
+    fmt: (v) => (v < 0 ? "Everything" : v === 0 ? "None" : `Last ${v} exchange${v === 1 ? "" : "s"}`),
+    help: "The model remembers nothing between messages. Every time, the app re-sends the conversation so far; this sets how much of it.",
+    explain: (v) => (v === 0 ? "Each message is a fresh start: tell it your name, then ask for it." : ""),
+  },
+};
+
+// Click an experiment and it sets things up for you.
+const SB_EXPERIMENTS = [
+  { title: "Same answer every time", how: "Temperature 0, then hit Regenerate a few times.",
+    set: { temperature: 0 }, prompt: "Write a one-sentence story about a cat." },
+  { title: "See it hesitate", how: "Token probabilities on. Hover the number it picks.",
+    set: { logprobs: true, temperature: 0.8 }, prompt: "Pick a random number between 1 and 100. Reply with just the number." },
+  { title: "It has no memory", how: "Memory: None. It can't know what you said a second ago.",
+    set: { memory: 0 }, prompt: "My name is Sam. What's my name?" },
+  { title: "Cut off mid-sentence", how: "Max reply length: 16 tokens.",
+    set: { num_predict: 16 }, prompt: "Explain how rainbows form." },
+  { title: "Turn the heat up", how: "Temperature 1.8 and Top P 1: unlikely tokens everywhere.",
+    set: { temperature: 1.8, top_p: 1, top_k: 100 }, prompt: "Describe your perfect breakfast." },
+  { title: "Rewrite its personality", how: "The “Always wrong” system prompt.",
+    preset: "wrong", prompt: "What's the capital of France?" },
+];
+
+function sbField(key) {
+  const f = SB_FIELDS[key];
+  const range = f.stops ? `min="0" max="${f.stops.length - 1}" step="1"` : `min="${f.min}" max="${f.max}" step="${f.step}"`;
+  return `<div class="sb-field" data-key="${key}">
+    <label class="sb-label" for="sb_${key}"><span>${f.label}</span><span class="sb-val"></span></label>
+    <input type="range" id="sb_${key}" ${range} />
+    <div class="sb-help">${f.help}</div>
+    ${f.explain ? '<div class="sb-explain"></div>' : ""}
+  </div>`;
+}
+
+function sbToggle(key, label, help) {
+  return `<label class="toggle sb-toggle"><input type="checkbox" id="sb_${key}" />
+    <span class="track"><span class="thumb"></span></span>
+    <span class="toggle-text">${label}<small>${help}</small></span></label>`;
+}
+
+function sbGroup(title, body, open = true) {
+  return `<details class="sb-group"${open ? " open" : ""}><summary>${title}
+    <svg viewBox="0 0 24 24" class="sb-chev"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </summary><div class="sb-body">${body}</div></details>`;
+}
+
+function buildSandboxPanel() {
+  const side = $("sbSide");
+  side.innerHTML =
+    `<div class="sb-head"><div><div class="sb-title">Sandbox</div>
+       <div class="sb-sub">Change anything here, then send a message (or hit Regenerate) to see what it does.</div></div>
+       <button class="sb-mini" id="sbReset" title="Put every sandbox setting back to the start">Reset</button></div>` +
+    sbGroup("Model", `<div class="sb-model" id="sbModel"><span class="sb-help">Loading…</span></div>`) +
+    sbGroup("System prompt",
+      `<select id="sbPreset" class="sb-select"></select>
+       <textarea id="sbSystem" class="sb-text" rows="5" spellcheck="false" placeholder="No system prompt: the model only sees your messages."></textarea>
+       <div class="sb-help">Instructions sent before the conversation. To the model it's just more text, placed first and labelled “system”, which it was trained to follow closely. <span id="sbSysCount"></span></div>`) +
+    sbGroup("Thinking",
+      sbToggle("think", "Think before answering", "The model writes out private reasoning first. Needs a thinking model, like Qwen 3.5.") +
+      sbField("think_budget")) +
+    sbGroup("Sampling: how the next token is picked",
+      `<div class="sb-help sb-lead">A model never writes a sentence at once. It predicts one token at a time; these decide how adventurous each pick is.</div>` +
+      sbField("temperature") + sbField("top_p") + sbField("top_k") + sbField("min_p") +
+      `<button class="sb-mini wide" id="sbModelDefaults">Use this model's recommended values</button>`) +
+    sbGroup("Repetition", sbField("repeat_penalty") + sbField("presence_penalty"), false) +
+    sbGroup("Length & memory",
+      sbField("num_predict") + sbField("num_ctx") + sbField("memory") +
+      `<div class="sb-field"><label class="sb-label" for="sb_stop"><span>Stop sequences</span></label>
+         <input id="sb_stop" class="sb-input" placeholder="e.g.  ., \\n" spellcheck="false" />
+         <div class="sb-help">It stops the moment it writes one of these. Separate them with commas.</div></div>`, false) +
+    sbGroup("Randomness seed",
+      sbToggle("seed_on", "Fixed seed", "The “random” picks come from a number generator. Same seed + same settings + same chat = the exact same reply.") +
+      `<div class="sb-seed"><input id="sb_seed" class="sb-input" type="number" min="0" step="1" />
+         <button class="sb-mini" id="sbDice" title="New random seed">🎲</button></div>`, false) +
+    sbGroup("Look inside",
+      sbToggle("logprobs", "Token probabilities", "Shows the reply token by token, shaded by how unsure the model was. Hover one to see what else it nearly said.") +
+      sbToggle("show_request", "Show the raw request", "Opens the exact JSON sent to Ollama under every reply."));
+
+  for (const key of Object.keys(SB_FIELDS)) {
+    const f = SB_FIELDS[key];
+    const input = $(`sb_${key}`);
+    const read = () => (f.stops ? f.stops[+input.value] : r2(+input.value));
+    input.addEventListener("input", () => {
+      sb.cfg[key] = read();
+      showSbField(key);
+      if (key === "num_ctx") renderCtxMeter();
+      saveSb();
+    });
+    if (key === "num_ctx") input.addEventListener("change", () => toast(`Context: ${sb.cfg.num_ctx / 1024}k. The model reloads on your next message`));
+  }
+  for (const key of ["think", "seed_on", "logprobs", "show_request"]) {
+    $(`sb_${key}`).addEventListener("change", (e) => {
+      sb.cfg[key] = e.target.checked;
+      showSbToggles();
+      saveSb();
+    });
+  }
+  $("sb_stop").addEventListener("input", (e) => ((sb.cfg.stop = e.target.value), saveSb()));
+  $("sb_seed").addEventListener("input", (e) => ((sb.cfg.seed = Math.max(0, Math.floor(+e.target.value || 0))), saveSb()));
+  $("sbDice").addEventListener("click", () => {
+    sb.cfg.seed = Math.floor(Math.random() * 100000);
+    sb.cfg.seed_on = true;
+    applySbConfig();
+    saveSb();
+  });
+  $("sbSystem").addEventListener("input", (e) => {
+    sb.cfg.system = e.target.value;
+    showSbSystem();
+    saveSb();
+  });
+  $("sbPreset").addEventListener("change", (e) => {
+    const p = sb.presets.find((x) => x.id === e.target.value);
+    if (!p) return;
+    sb.cfg.system = p.text;
+    $("sbSystem").value = p.text;
+    showSbSystem();
+    saveSb();
+  });
+  $("sbReset").addEventListener("click", () => {
+    sb.cfg = { ...sb.defaults };
+    applySbConfig();
+    saveSb();
+    toast("Sandbox settings reset");
+  });
+  $("sbModelDefaults").addEventListener("click", () => {
+    const d = sb.info?.defaults;
+    if (!d) return toast("Couldn't read this model's settings");
+    Object.assign(sb.cfg, d);
+    applySbConfig();
+    saveSb();
+    const own = sb.info.own_defaults || [];
+    toast(own.length ? `Using what ${prettyModel(sb.info.model)} ships with: ${own.map((k) => `${k} ${r2(d[k])}`).join(", ")}`
+                     : `${prettyModel(sb.info.model)} doesn't set its own, so these are Ollama's defaults`, 5000);
+  });
+}
+
+function showSbField(key) {
+  const f = SB_FIELDS[key];
+  const v = sb.cfg[key];
+  const el = document.querySelector(`.sb-field[data-key="${key}"]`);
+  el.querySelector(".sb-val").textContent = f.fmt(v);
+  const ex = el.querySelector(".sb-explain");
+  if (ex) {
+    ex.textContent = f.explain(v);
+    ex.hidden = !ex.textContent;
+    ex.classList.toggle("warn", ex.textContent.startsWith("⚠"));
+  }
+}
+
+function showSbToggles() {
+  document.querySelector('.sb-field[data-key="think_budget"]').classList.toggle("off", !sb.cfg.think);
+  $("sb_seed").disabled = !sb.cfg.seed_on;
+  $("sbChat").classList.toggle("show-request", !!sb.cfg.show_request);
+}
+
+function showSbSystem() {
+  const text = sb.cfg.system || "";
+  const match = sb.presets.find((p) => p.text === text);
+  $("sbPreset").value = match ? match.id : "custom";
+  // A token is roughly four characters of English.
+  $("sbSysCount").textContent = text ? `About ${Math.max(1, Math.round(text.length / 4)).toLocaleString()} tokens.` : "";
+}
+
+function applySbConfig() {
+  const c = sb.cfg;
+  for (const key of Object.keys(SB_FIELDS)) {
+    const f = SB_FIELDS[key];
+    if (f.stops) {
+      const i = f.stops.indexOf(c[key]);
+      $(`sb_${key}`).value = i >= 0 ? i : f.stops.findIndex((s) => s >= c[key]) >= 0 ? f.stops.findIndex((s) => s >= c[key]) : f.stops.length - 1;
+    } else {
+      $(`sb_${key}`).value = c[key];
+    }
+    showSbField(key);
+  }
+  for (const key of ["think", "seed_on", "logprobs", "show_request"]) $(`sb_${key}`).checked = !!c[key];
+  $("sb_stop").value = c.stop || "";
+  $("sb_seed").value = c.seed ?? 42;
+  $("sbSystem").value = c.system || "";
+  showSbSystem();
+  showSbToggles();
+  renderCtxMeter();
+}
+
+function saveSb() {
+  clearTimeout(sb.saveTimer);
+  sb.saveTimer = setTimeout(() => save({ sandbox: sb.cfg }), 400);
+}
+
+function fmtBytes(n) {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`;
+}
+
+async function loadSbModel() {
+  if (!api) return;
+  const info = await api.sandbox_model_info(settings.model);
+  sb.info = info.error ? null : info;
+  const box = $("sbModel");
+  if (info.error) {
+    box.innerHTML = `<span class="sb-help">Couldn't ask Ollama about this model.</span>`;
+    return;
+  }
+  const bits = /^Q(\d)/i.exec(info.quant || "")?.[1] || (/F16|BF16/i.test(info.quant) ? "16" : /F32/i.test(info.quant) ? "32" : "");
+  const rows = [
+    ["Model", prettyModel(info.model), "Pick a different one in the top bar."],
+    ["Size", info.params ? `${info.params} parameters` : "?",
+     "Parameters are the numbers the model learned in training. More usually means smarter, but bigger and slower."],
+    ["Precision", info.quant || "?", bits
+      ? `Each parameter is squeezed into about ${bits} bits (instead of 16) so the model fits in your GPU, losing a little accuracy.`
+      : "How precisely each parameter is stored."],
+    ["On disk", info.size ? fmtBytes(info.size) : "?", "This all has to fit in your GPU's memory to run fast."],
+    ["Trained context", info.trained_ctx ? `${fmtTokens(info.trained_ctx)} tokens` : "?",
+     "The longest text it was trained to handle. The context window below is how much you actually let it use, because memory is limited."],
+  ];
+  const caps = (info.capabilities || []).filter((c) => c !== "completion");
+  box.innerHTML =
+    rows.map(([k, v, tip]) => `<div class="sb-row" title="${escapeHtml(tip)}"><span>${k}</span><b>${escapeHtml(v)}</b></div>`).join("") +
+    (caps.length ? `<div class="sb-caps">${caps.map((c) => `<span class="sb-cap">${escapeHtml(c)}</span>`).join("")}</div>` : "");
+}
+
+function sbEmptyState() {
+  const chat = $("sbChat");
+  chat.innerHTML = "";
+  sb.turns.clear();
+  const el = document.createElement("div");
+  el.className = "sb-empty";
+  el.innerHTML =
+    '<div class="empty-title">Same model, nothing hidden.</div>' +
+    '<div class="empty-sub">Change a setting on the left and see what it does. Every reply shows its tokens, speed, why it stopped and exactly what was sent. Try an experiment:</div>' +
+    '<div class="sb-exps"></div>';
+  for (const x of SB_EXPERIMENTS) {
+    const card = document.createElement("button");
+    card.className = "sb-exp";
+    card.innerHTML = `<b></b><span></span>`;
+    card.querySelector("b").textContent = x.title;
+    card.querySelector("span").textContent = x.how;
+    card.addEventListener("click", () => runExperiment(x));
+    el.querySelector(".sb-exps").appendChild(card);
+  }
+  chat.appendChild(el);
+}
+
+function runExperiment(x) {
+  if (x.set) Object.assign(sb.cfg, x.set);
+  if (x.preset) sb.cfg.system = sb.presets.find((p) => p.id === x.preset)?.text || "";
+  applySbConfig();
+  saveSb();
+  $("textInput").value = x.prompt;
+  $("textInput").focus();
+  toast("Settings changed on the left. Press Enter to send");
+}
+
+function sbSend(text) {
+  addMessage("user", text, "You", $("sbChat"));
+  api?.sandbox_send(text, sb.cfg);
+}
+
+// The settings a reply was made with, in one line, to compare replies with each other.
+function sbUsedLine(c) {
+  const parts = [`temp ${c.temperature}`, `top-p ${c.top_p}`, `top-k ${c.top_k}`];
+  if (c.min_p) parts.push(`min-p ${c.min_p}`);
+  if (c.repeat_penalty !== 1) parts.push(`repeat ${c.repeat_penalty}`);
+  if (c.presence_penalty) parts.push(`presence ${c.presence_penalty}`);
+  parts.push(c.seed_on ? `seed ${c.seed}` : "random seed");
+  parts.push(c.think ? `thinking ≤ ${c.think_budget ? fmtTokens(c.think_budget) : "∞"}` : "no thinking");
+  if (c.memory >= 0) parts.push(`memory ${c.memory}`);
+  return parts.join(" · ");
+}
+
+const STOP_REASONS = {
+  stop: ["Ended by itself", "The model produced its special end-of-reply token (or wrote one of your stop sequences)."],
+  length: ["Hit max length", "It ran into the Max reply length cap and was cut off, wherever it was."],
+  cancelled: ["Stopped by you", "You stopped it before it finished."],
+};
+
+function sbTokenHtml(tokens) {
+  return tokens
+    .map((tk, i) => {
+      const u = tk.p == null ? 0 : 1 - tk.p;
+      const text = escapeHtml(tk.t).replace(/\n/g, '<span class="tok-nl">↵</span>\n');
+      return `<span class="tok" data-i="${i}" style="--u:${u.toFixed(3)}">${text}</span>`;
+    })
+    .join("");
+}
+
+function renderSbTurn(turn) {
+  const bubble = turn.bubble;
+  const tokensView = turn.view === "tokens" && turn.tokens.some((t) => t.p != null);
+  bubble.classList.toggle("md", !tokensView);
+  bubble.classList.toggle("tokens", tokensView);
+  if (!turn.text) return;
+  bubble.innerHTML = tokensView
+    ? sbTokenHtml(turn.tokens) + (turn.live ? '<span class="caret"></span>' : "")
+    : renderMarkdown(turn.text, turn.live);
+  scrollChat();
+}
+
+function sbChip(text, tip, cls = "") {
+  return `<span class="sb-chip ${cls}" title="${escapeHtml(tip)}">${escapeHtml(text)}</span>`;
+}
+
+function finishSbTurn(turn, st) {
+  turn.live = false;
+  turn.el.classList.remove("streaming");
+  turn.bubble.querySelector(".typing")?.remove();
+  if (turn.th) endThoughts(turn.th);
+  if (!turn.text.trim()) {
+    turn.bubble.innerHTML = `<span class="no-answer">${st?.done_reason === "cancelled" ? "Stopped before it answered." : "No reply."}</span>`;
+  } else {
+    renderSbTurn(turn);
+  }
+  if (!st) return;
+  const chips = [];
+  chips.push(sbChip(`${st.reply_tokens.toLocaleString()} reply token${st.reply_tokens === 1 ? "" : "s"}`,
+    "How many tokens the reply is. Each one took a full pass through the whole model."));
+  if (st.think_tokens) chips.push(sbChip(`${st.think_tokens.toLocaleString()} thinking`,
+    "Tokens it spent reasoning before answering. You don't see them in the reply, but they cost the same time."));
+  if (st.eval_secs > 0) chips.push(sbChip(`${(st.eval_tokens / st.eval_secs).toFixed(1)} tok/s`,
+    "Generation speed: how many tokens per second your GPU produced."));
+  if (st.prompt_tokens) chips.push(sbChip(`read ${st.prompt_tokens.toLocaleString()} tokens`,
+    `Before writing anything, it read the whole request (system prompt + history + your message): ${st.prompt_tokens.toLocaleString()} tokens` +
+    (st.prompt_secs ? ` in ${fmtSecs(st.prompt_secs)}. Ollama reuses what it read last time when the start is unchanged, which is why that can be quick.` : ".")));
+  if (st.ttft != null) chips.push(sbChip(`first token ${fmtSecs(st.ttft)}`,
+    "Time until the first word of the reply appeared (includes loading, reading the prompt and any thinking)."));
+  if (st.load_secs > 0.5) chips.push(sbChip(`loaded model ${fmtSecs(st.load_secs)}`,
+    "Ollama had to load the model into memory first, e.g. after a context window change.", "warn"));
+  if (st.budget_hit) chips.push(sbChip(`thinking budget hit`,
+    `It reached the ${st.budget_hit.toLocaleString()}-token thinking budget, so this app stopped it and made a second request asking for an answer from its notes.`, "warn"));
+  const reason = STOP_REASONS[st.done_reason];
+  if (reason) chips.push(sbChip(reason[0], reason[1], st.done_reason === "stop" ? "" : "warn"));
+
+  const meta = document.createElement("div");
+  meta.className = "sb-meta";
+  const canTokens = turn.tokens.some((t) => t.p != null);
+  meta.innerHTML =
+    `<div class="sb-chips">${chips.join("")}</div>` +
+    `<div class="sb-used"></div>` +
+    `<div class="sb-actions">` +
+    (canTokens ? `<button class="sb-act" data-a="view"></button>` : "") +
+    `<button class="sb-act" data-a="req">Request</button>` +
+    `<button class="sb-act sb-regen" data-a="regen" title="Ask the same question again with the settings on the left. This reply stays here to compare.">` +
+    `<svg viewBox="0 0 24 24" class="ico"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Regenerate</button>` +
+    `</div><pre class="sb-req"></pre>`;
+  meta.querySelector(".sb-used").textContent = sbUsedLine(turn.cfg);
+  meta.querySelector(".sb-req").textContent = turn.requests
+    .map((b, i) => (turn.requests.length > 1 ? `// Request ${i + 1}${i ? ": answer from the notes" : ""}\n` : "") + JSON.stringify(b, null, 2))
+    .join("\n\n");
+  const viewBtn = meta.querySelector('[data-a="view"]');
+  const label = () => viewBtn && (viewBtn.textContent = turn.view === "tokens" ? "Show text" : "Show tokens");
+  label();
+  meta.addEventListener("click", (e) => {
+    const a = e.target.closest(".sb-act")?.dataset.a;
+    if (a === "view") {
+      turn.view = turn.view === "tokens" ? "text" : "tokens";
+      label();
+      renderSbTurn(turn);
+    } else if (a === "req") {
+      meta.classList.toggle("req-open");
+    } else if (a === "regen") {
+      regenerate(turn);
+    }
+  });
+  turn.el.appendChild(meta);
+  if (canTokens && turn.view === "tokens") {
+    const legend = document.createElement("div");
+    legend.className = "tok-legend";
+    legend.innerHTML = '<span>sure</span><i></i><span>unsure</span><em>hover a token</em>';
+    turn.el.insertBefore(legend, turn.bubble);
+  }
+  scrollChat();
+}
+
+async function regenerate(turn) {
+  if (!api) return;
+  const text = await api.sandbox_regenerate(sb.cfg);
+  if (!text) return toast("Nothing to regenerate");
+  // Keep the old reply on screen to compare, but it's no longer in the model's memory.
+  turn.el.classList.add("superseded");
+  turn.el.querySelector(".who").textContent = "Earlier try · not in memory";
+}
+
+Object.assign(handlers, {
+  sb_start({ id }) {
+    const el = addMessage("bot streaming sb-turn", null, assistantLabel(), $("sbChat"));
+    const bubble = el.querySelector(".bubble");
+    bubble.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+    sb.turns.set(id, { el, bubble, text: "", tokens: [], requests: [], live: true,
+                       view: sb.cfg.logprobs ? "tokens" : "text", cfg: { ...sb.cfg }, th: null });
+  },
+  sb_request({ id, body }) {
+    sb.turns.get(id)?.requests.push(body);
+  },
+  sb_thought({ id, t }) {
+    const turn = sb.turns.get(id);
+    if (!turn) return;
+    const th = turn.th || (turn.th = makeThoughts(turn));
+    th.body.append(t);
+    if (th.el.open) th.body.scrollTop = th.body.scrollHeight;
+  },
+  sb_token({ id, t, tokens }) {
+    const turn = sb.turns.get(id);
+    if (!turn) return;
+    if (turn.th) endThoughts(turn.th);
+    turn.text += t;
+    turn.tokens.push(...(tokens?.length ? tokens : [{ t, p: null, alt: [] }]));
+    renderSbTurn(turn);
+  },
+  sb_note({ id, t }) {
+    const turn = sb.turns.get(id);
+    if (!turn) return;
+    const el = document.createElement("div");
+    el.className = "sb-note";
+    el.textContent = t;
+    turn.el.insertBefore(el, turn.bubble);
+    scrollChat();
+  },
+  sb_done({ id, stats }) {
+    const turn = sb.turns.get(id);
+    if (!turn) return;
+    finishSbTurn(turn, stats);
+    sb.turns.delete(id);
+    sbDone.set(id, turn); // kept for the token tooltips
+  },
+});
+const sbDone = new Map(); // finished turn id -> turn
+
+// Hovering a token: how sure it was, and what else it nearly picked.
+function tokLabel(t) {
+  return t.replace(/ /g, "·").replace(/\n/g, "↵").replace(/\t/g, "⇥") || "∅";
+}
+
+function showTokTip(span) {
+  const msg = span.closest(".msg");
+  const turn = [...sb.turns.values(), ...sbDone.values()].find((x) => x.el === msg);
+  const tk = turn?.tokens[+span.dataset.i];
+  const tip = $("tokTip");
+  if (!tk || tk.p == null) return (tip.classList.remove("show"));
+  const pct = (p) => (p >= 0.995 ? ">99%" : p < 0.001 ? "<0.1%" : `${(p * 100).toFixed(p < 0.1 ? 1 : 0)}%`);
+  const top = tk.alt[0];
+  const rows = tk.alt
+    .map(([t, p]) => `<div class="tt-row${t === tk.t ? " picked" : ""}"><code>${escapeHtml(tokLabel(t))}</code>` +
+                      `<span class="tt-bar"><i style="width:${Math.max(2, p * 100)}%"></i></span><span>${pct(p)}</span></div>`)
+    .join("");
+  const tookLess = top && top[0] !== tk.t && top[1] > tk.p;
+  tip.innerHTML =
+    `<div class="tt-head"><code>${escapeHtml(tokLabel(tk.t))}</code><b>${pct(tk.p)}</b></div>` +
+    `<div class="tt-sub">How likely the model thought this token was. Its top ${tk.alt.length} options:</div>${rows}` +
+    (tookLess ? `<div class="tt-foot">It didn't pick its favourite: sampling is random, and temperature, top-p and top-k decide how often an underdog wins.</div>`
+              : tk.p > 0.9 ? `<div class="tt-foot">Almost no doubt here.</div>` : "");
+  const r = span.getBoundingClientRect();
+  tip.classList.add("show");
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = `${Math.min(Math.max(8, r.left + r.width / 2 - w / 2), innerWidth - w - 8)}px`;
+  tip.style.top = `${r.top - h - 8 < 8 ? r.bottom + 8 : r.top - h - 8}px`;
+}
+
+$("sbChat").addEventListener("mouseover", (e) => {
+  const span = e.target.closest(".tok");
+  if (span) showTokTip(span);
+});
+$("sbChat").addEventListener("mouseout", (e) => {
+  if (e.target.closest(".tok") && !e.relatedTarget?.closest?.(".tok")) $("tokTip").classList.remove("show");
+});
+$("sbChat").addEventListener("scroll", () => $("tokTip").classList.remove("show"));
+
+async function initSandbox() {
+  buildSandboxPanel();
+  const r = await api.sandbox_init();
+  sb.defaults = r.defaults;
+  sb.cfg = r.config;
+  sb.presets = r.presets;
+  fillSelect($("sbPreset"), [...r.presets.map((p) => p.id), "custom"], null,
+             (id) => r.presets.find((p) => p.id === id)?.label || "Custom (your own)");
+  applySbConfig();
+  sbEmptyState();
+  loadSbModel();
 }
 
 async function boot() {
@@ -971,6 +1623,8 @@ async function boot() {
   const info = await api.init();
   applyFolder(info.code_folder);
   codeEmptyState();
+  settings = info.settings;
+  await initSandbox();
   applySettings(info.settings, info.models, info.voices, info.styles);
   $("whisperStatus").textContent = info.whisper_ready ? "ready" : "loading…";
   if (info.error) addMessage("bot error", info.error, "System");

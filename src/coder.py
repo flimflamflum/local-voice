@@ -10,13 +10,14 @@ Small local models have small context windows, so old tool output is trimmed as 
 conversation grows (see CodeAgent._fit).
 """
 import difflib
+import os
 import re
 import subprocess
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 from src import search
-from src.llm import NUM_CTX
 
 MAX_STEPS = 30              # model turns per request before we stop it
 READ_MAX_LINES = 220        # per read_file call
@@ -28,10 +29,10 @@ SEARCH_FILE_MAX_BYTES = 1_000_000
 CMD_TIMEOUT = 120
 DIFF_MAX_LINES = 300
 NUM_PREDICT = 4096          # room for a whole file inside a write_file call
-THINK_NUM_PREDICT = 6144
 # Roughly what the history may use: the context minus the system prompt, tool definitions and
 # room for the reply. Code is about 3 characters per token.
-HISTORY_BUDGET_CHARS = max(6000, (NUM_CTX - NUM_PREDICT // 2 - 1800) * 3)
+def history_budget(num_ctx):
+    return max(6000, (num_ctx - NUM_PREDICT // 2 - 1800) * 3)
 
 # Qwen's recommended sampling, minus the presence penalty: code repeats names on purpose.
 SAMPLING = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}
@@ -124,14 +125,15 @@ class CodeAgent:
         self._undo_note = ""          # told to the model with the next request
 
     # ------------------------------------------------------------------ the loop
-    def run(self, model, text, cancel, ui, think=False, web=False, turn=None):
+    def run(self, model, text, cancel, ui, think=False, web=False, turn=None, usage=None):
         """ui: token(t), thought(t), tool_start(tid, name, label), tool_end(tid, ok, summary, output, diff),
         ask(kind, label, detail) -> "allow" | "always" | "deny", note(text).
-        `turn` names this request's checkpoint, for undo()."""
+        `turn` names this request's checkpoint, for undo(). Token counts for every model step
+        are added to `usage` (see OllamaClient.stream_chat)."""
         self._checkpoint = {"turn": turn, "files": {}}
         self.checkpoints.append(self._checkpoint)
         try:
-            self._run(model, text, cancel, ui, think, web)
+            self._run(model, text, cancel, ui, think, web, usage)
         finally:
             if not self._checkpoint["files"] and self._checkpoint in self.checkpoints:
                 self.checkpoints.remove(self._checkpoint)
@@ -175,7 +177,7 @@ class CodeAgent:
         if cp is not None and full not in cp["files"]:
             cp["files"][full] = full.read_bytes() if full.is_file() else None
 
-    def _run(self, model, text, cancel, ui, think, web):
+    def _run(self, model, text, cancel, ui, think, web, usage=None):
         if self._undo_note:
             text, self._undo_note = self._undo_note + text, ""
         self.history.append({"role": "user", "content": text})
@@ -186,7 +188,7 @@ class CodeAgent:
             meta, said = {}, ""
             for token in self.ollama.chat_step(
                 model, messages, cancel, meta, tools=tools, think=think, on_thinking=ui.thought,
-                num_predict=THINK_NUM_PREDICT if think else NUM_PREDICT, sampling=SAMPLING,
+                num_predict=NUM_PREDICT, sampling=SAMPLING, usage=usage,  # the thinking budget is added on top
             ):
                 said += token
                 ui.token(token)
@@ -324,8 +326,10 @@ class CodeAgent:
             raise ToolError(f"{self._rel(full)} is a folder.")
         content = _unescape(str(args.get("content") or ""))
         old, nl, bom = _read_text(full) if full.exists() else ("", "\n", False)
+        content, fixed = _fix_python_quotes(full, content)
         if full.exists() and old == content:
-            return "no change", f"{self._rel(full)} already has exactly this content.", ""
+            raise ToolError(f"{self._rel(full)} already has exactly this content, so nothing changed."
+                            + _lookalike_hint(content))
         diff = _diff(self._rel(full), old, content)
         self._approve("edit", ("Overwrite " if full.exists() else "Create ") + self._rel(full), diff, cancel, ui)
         self._snapshot(full)
@@ -333,36 +337,54 @@ class CodeAgent:
         _write_text(full, content, nl, bom)
         n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
         verb = "Updated" if old else "Created"
-        return _diff_stats(diff), f"{verb} {self._rel(full)} ({n} lines).", diff
+        return _diff_stats(diff), f"{verb} {self._rel(full)} ({n} lines).{fixed}{_syntax_note(full, content)}", diff
 
     def _t_edit_file(self, args, cancel, ui):
         full = self._path(args.get("path"))
         if full.is_dir():
             raise ToolError(f"{self._rel(full)} is a folder.")
-        old_text = _unescape(str(args.get("old_text") or "")).replace("\r\n", "\n")
-        new_text = _unescape(str(args.get("new_text") or "")).replace("\r\n", "\n")
+        old_text = str(args.get("old_text") or "").replace("\r\n", "\n")
+        new_text = str(args.get("new_text") or "").replace("\r\n", "\n")
         if not old_text:
             raise ToolError("old_text is empty. To create or replace a whole file, use write_file.")
         text, nl, bom = _read_text(full)
+        # Undo double-escaped newlines only when the model clearly did that: old_text isn't in the
+        # file as given, but is once unescaped. A one-line edit with "\n" inside a string literal
+        # must stay as it is, or the string gets split over two lines.
+        if old_text not in text and _unescape(old_text) != old_text and _unescape(old_text) in text:
+            old_text, new_text = _unescape(old_text), _unescape(new_text)
         count = text.count(old_text)
+        missed = ""
         if count == 0:
             new = _loose_replace(text, old_text, new_text)
             if new is None:
-                raise ToolError(
-                    f"old_text wasn't found in {self._rel(full)}. read_file it again and copy the exact lines, "
-                    "including indentation."
-                )
+                # Models can't reliably copy curly quotes (they drop or straighten one), so an edit
+                # aimed at a line Python rejects for them often misses. Fix those quotes instead.
+                new = text
+                missed = ("old_text wasn't found, so your edit wasn't applied. But the file had curly "
+                          "quotes or other lookalike characters that broke it, so those were fixed instead.")
+                if _fix_python_quotes(full, text)[0] == text:
+                    raise ToolError(
+                        f"old_text wasn't found in {self._rel(full)}. read_file it again and copy the exact lines, "
+                        "including indentation." + (_lookalike_hint(old_text) if _has_lookalike(old_text) else "")
+                    )
         elif count > 1:
             raise ToolError(f"old_text appears {count} times in {self._rel(full)}. Include more surrounding lines so it's unique.")
         else:
             new = text.replace(old_text, new_text, 1)
+        new, fixed = _fix_python_quotes(full, new)
         if new == text:
-            return "no change", "old_text and new_text are the same; nothing changed.", ""
+            why = ("old_text and new_text are identical" if old_text == new_text
+                   else "that edit leaves the file exactly as it was")
+            raise ToolError(f"Nothing changed: {why}." + _lookalike_hint(old_text))
         diff = _diff(self._rel(full), text, new)
         self._approve("edit", f"Edit {self._rel(full)}", diff, cancel, ui)
         self._snapshot(full)
         _write_text(full, new, nl, bom)
-        return _diff_stats(diff), f"Edited {self._rel(full)}.", diff
+        if missed:
+            return (_diff_stats(diff), f"{missed} Changed lines:\n{_changed_lines(text, new)}"
+                    f"{_syntax_note(full, new)}", diff)
+        return _diff_stats(diff), f"Edited {self._rel(full)}.{fixed}{_syntax_note(full, new)}", diff
 
     def _t_run_command(self, args, cancel, ui):
         command = str(args.get("command") or "").strip()
@@ -410,25 +432,26 @@ class CodeAgent:
     def _fit(self):
         """The history, trimmed to fit the context: old tool output goes first, then whole old turns."""
         msgs = [dict(m) for m in self.history]
+        budget = history_budget(self.ollama.num_ctx)
         size = lambda: sum(_msg_chars(m) for m in msgs)  # noqa: E731
         # Never trim the newest exchange: the model needs what it just read.
         keep_from = max(0, len(msgs) - 3)
         for i, m in enumerate(msgs[:keep_from]):
-            if size() <= HISTORY_BUDGET_CHARS:
+            if size() <= budget:
                 break
             if m["role"] == "tool" and m["content"] != ELIDED and len(m["content"]) > 200:
                 m["content"] = ELIDED
             elif m.get("tool_calls"):
                 m["tool_calls"] = [_shrink_call(c) for c in m["tool_calls"]]
         # Still too big: drop the oldest turns (a turn starts at a user message).
-        while size() > HISTORY_BUDGET_CHARS:
+        while size() > budget:
             starts = [i for i, m in enumerate(msgs) if m["role"] == "user"]
             if len(starts) < 2:
                 break
             msgs = msgs[starts[1]:]
         # Last resort, one huge exchange: cut the oldest tool outputs in what's left.
         for m in msgs:
-            if size() <= HISTORY_BUDGET_CHARS:
+            if size() <= budget:
                 break
             if m["role"] == "tool" and len(m["content"]) > 1500 and m is not msgs[-1]:
                 m["content"] = m["content"][:1500] + "\n[...cut to save space...]"
@@ -521,6 +544,126 @@ def _unescape(s):
     if "\n" not in s and "\\n" in s:
         return s.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
     return s
+
+
+# Characters models write that look like ASCII but aren't. In code outside a string, each one is
+# an error (Python: "invalid character '’' (U+2019)"), and a model can't see the difference when it
+# tries to fix it, so it "fixes" the line by writing it out exactly the same again.
+LOOKALIKES = {
+    "‘": "'", "’": "'", "‚": "'", "′": "'",
+    "“": '"', "”": '"', "„": '"', "″": '"',
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    "−": "-", "–": "-",
+}
+PYTHON_SUFFIXES = {".py", ".pyw"}
+
+
+def _has_lookalike(s):
+    return any(ch in LOOKALIKES for ch in s)
+
+
+def _changed_lines(old, new, limit=8):
+    """The lines of `new` that differ from `old` (same line count), numbered like read_file."""
+    rows = [f"{n:>5}| {b}" for n, (a, b) in enumerate(zip(old.split("\n"), new.split("\n")), 1) if a != b]
+    return "\n".join(rows[:limit]) + (f"\n[...and {len(rows) - limit} more]" if len(rows) > limit else "")
+
+
+def _lookalike_hint(s):
+    """For a failed edit: name any lookalike characters, and show the text with plain ones."""
+    found = sorted({ch for ch in s if ch in LOOKALIKES})
+    if not found:
+        return (" Don't repeat the same call. If you meant to fix an error, run the code again to see the "
+                "current error, then read_file those lines: the file may already be right.")
+    names = ", ".join(f"{ch!r} ({unicodedata.name(ch, 'U+%04X' % ord(ch)).lower()}, U+{ord(ch):04X})"
+                      for ch in found)
+    plain = "".join(LOOKALIKES.get(ch, ch) for ch in s)
+    hint = (f" The text contains characters that only look like plain ASCII: {names}. Python and most "
+            "languages reject them outside strings. Replace each one with the plain character it looks like")
+    if len(plain) <= 600:
+        return hint + f". For example, new_text:\n{plain}"
+    return hint + "."
+
+
+def _fix_python_quotes(full, text):
+    """Swap lookalike characters that make a Python file fail to compile for plain ones. Python
+    only rejects them outside string literals, so this never changes the text inside a string.
+    Returns (text, a note for the model, or "")."""
+    if full.suffix.lower() not in PYTHON_SUFFIXES:
+        return text, ""
+    fixed = 0
+    for _ in range(500):
+        err = _compile_error(text, full.name)
+        m = re.match(r"invalid (?:non-printable )?character '(.)'", getattr(err, "msg", "") or "")
+        if not m or m.group(1) not in LOOKALIKES or not err.lineno:
+            break
+        lines = text.split("\n")
+        n = err.lineno - 1
+        line, swapped = _plain_line(lines[n])
+        if not swapped:
+            break
+        candidate = "\n".join(lines[:n] + [line] + lines[n + 1:])
+        after = _compile_error(candidate, full.name)
+        if after is not None and after.lineno == err.lineno:
+            break  # didn't get that line compiling: leave it to the model rather than guess
+        text, fixed = candidate, fixed + swapped
+    if not fixed:
+        return text, ""
+    return text, (f" Note: swapped {fixed} curly quote(s) or other lookalike character(s) outside strings for "
+                  "plain ones, since Python rejects them. Always write plain ASCII quotes in code.")
+
+
+def _compile_error(text, name):
+    """The SyntaxError compiling `text` raises, or None. Other failures count as no error."""
+    try:
+        compile(text, name, "exec", dont_inherit=True)
+    except SyntaxError as e:
+        return e
+    except (ValueError, OverflowError, RecursionError):
+        pass
+    return None
+
+
+def _plain_line(line):
+    """Swap lookalikes for plain characters in one line of Python, outside its strings. A curly
+    quote outside a string is taken as a quote mark, so ’.’ becomes '.' as a whole, while the ’
+    in "Don’t" (inside a real string) is left alone. Returns (line, how many were swapped)."""
+    out, quote, curly, swapped, i = [], None, False, 0, 0
+    while i < len(line):
+        ch = line[i]
+        if quote is None:
+            if ch == "#":
+                out.append(line[i:])
+                break
+            if ch in "'\"":
+                quote, curly = ch, False
+            elif ch in LOOKALIKES:
+                ch, swapped = LOOKALIKES[ch], swapped + 1
+                if ch in "'\"":
+                    quote, curly = ch, True
+        elif ch == "\\":
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        elif ch == quote:
+            quote = None
+        elif curly and LOOKALIKES.get(ch) == quote:  # closes a string a curly quote opened
+            ch, quote, swapped = quote, None, swapped + 1
+        out.append(ch)
+        i += 1
+    return "".join(out), swapped
+
+
+def _syntax_note(full, text):
+    """A Python file that doesn't compile after a change: say so straight away, with the line."""
+    e = _compile_error(text, full.name) if full.suffix.lower() in PYTHON_SUFFIXES else None
+    if e is None:
+        return ""
+    where = f" on line {e.lineno}" if e.lineno else ""
+    line = ""
+    src = text.split("\n")
+    if e.lineno and 0 < e.lineno <= len(src):
+        line = f"\n{e.lineno:>5}| {src[e.lineno - 1]}"
+    return f"\nWarning: {full.name} now has a syntax error{where}: {e.msg}{line}\nFix it before going on."
 
 
 def _msg_chars(m):
@@ -634,10 +777,14 @@ def _run_powershell(command, cwd, cancel):
     """(exit code or None on timeout/stop, combined output)."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ProgressPreference = 'SilentlyContinue'; " + command
+    # PowerShell reads programs' output as UTF-8 (above), but Python writes to a pipe in the Windows
+    # code page, so a character like ’ in an error came through as "�" and the model couldn't tell
+    # what was wrong. Make Python write UTF-8 too.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen(
         ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
         cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-        creationflags=flags,
+        creationflags=flags, env=env,
     )
     waited, out = 0.0, b""
     while True:

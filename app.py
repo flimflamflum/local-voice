@@ -15,9 +15,10 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 import webview  # noqa: E402
 
 from src import link
-from src.llm import NUM_CTX, OllamaClient
+from src.llm import OllamaClient
 from src import search
 from src.coder import CodeAgent
+from src import sandbox
 from src.prompt import build_system_prompt, style_options
 from src.settings import Settings
 from src.stt import Recorder, Transcriber, is_real_speech
@@ -35,6 +36,10 @@ class Api:
         self._window = None
         self._settings = Settings()
         self._ollama = OllamaClient(self._settings.get("ollama_url"))
+        self._ollama.num_ctx = int(self._settings.get("num_ctx"))
+        self._ollama.think_effort = self._settings.get("think_effort")
+        self._ollama.on_context = lambda used: self._emit("ctx", {
+            "used": used, "max": self._ollama.num_ctx, "mode": self._settings.get("app_mode")})
         self._history = []
         self._gen = 0  # bumped on every interrupt so stale threads bail out
         self._cancel = threading.Event()
@@ -45,6 +50,8 @@ class Api:
         self._coder = None  # Vesper Code agent for the chosen folder
         self._code_thread = None  # the Vesper Code request running now, if any
         self._asks = {}  # Vesper Code permission prompts waiting for an answer: id -> [Event, answer]
+        self._sandbox = sandbox.Sandbox(self._ollama)
+        self._sb_thread = None  # the Sandbox reply running now, if any
 
         self._recorder = Recorder(on_level=lambda lvl: self._emit("level", round(lvl, 3)))
         self._transcriber = Transcriber(self._settings.get("whisper_model"))
@@ -134,6 +141,46 @@ class Api:
             waiting[1] = answer
             waiting[0].set()
 
+    # ---------------------------------------------------------------- Sandbox
+    def sandbox_init(self):
+        """Defaults, saved settings and system prompt presets for the Sandbox panel."""
+        s = self._settings
+        vesper = build_system_prompt(s.get("assistant_name"), s.get("user_name"),
+                                     s.get("style") if s.get("style") != "normal" else "playful")
+        presets = [{"id": i, "label": label, "text": text} for i, label, text in sandbox.PRESETS]
+        presets.insert(1, {"id": "vesper", "label": f"{s.get('assistant_name') or 'Vesper'}'s real voice prompt",
+                           "text": vesper})
+        # Start from the chat's context size: a different size makes Ollama reload the model.
+        defaults = {**sandbox.DEFAULTS, "num_ctx": int(s.get("num_ctx") or sandbox.DEFAULTS["num_ctx"])}
+        saved = s.get("sandbox") or {}
+        return {"defaults": defaults, "config": {**defaults, **saved}, "presets": presets}
+
+    def sandbox_model_info(self, model=None):
+        try:
+            return self._sandbox.model_info(model or self._settings.get("model"))
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
+    def sandbox_send(self, text, cfg):
+        text = (text or "").strip()
+        if not text:
+            return
+        self._sandbox_stop()
+        self._sandbox_start(text, cfg)
+
+    def sandbox_regenerate(self, cfg):
+        """Ask the last question again (with the current settings). Returns that question."""
+        self._sandbox_stop()
+        text = self._sandbox.pop_last()
+        if text:
+            self._sandbox_start(text, cfg)
+        return text
+
+    def sandbox_new(self):
+        self._sandbox_stop()
+        self._sandbox.clear()
+        self._set_state("idle")
+
     def toggle_listen(self):
         if not self._settings.get("voice_mode"):
             return
@@ -177,6 +224,13 @@ class Api:
             self._speaker.configure(
                 voice=changes.get("voice"), rate=changes.get("rate"), volume=changes.get("volume")
             )
+        if "think_effort" in changes:
+            self._ollama.think_effort = changes["think_effort"]
+        if "num_ctx" in changes and int(changes["num_ctx"]) != self._ollama.num_ctx:
+            # A new context size makes Ollama reload the model; do it now rather than on the next reply.
+            self._ollama.num_ctx = int(changes["num_ctx"])
+            if not changes.get("model") and old_model:
+                threading.Thread(target=self._ollama.warm_up, args=(old_model,), daemon=True).start()
         if changes.get("model") and changes["model"] != old_model:
             self._model_switch = threading.Thread(
                 target=self._ollama.switch_model, args=(old_model, changes["model"]), daemon=True
@@ -357,7 +411,6 @@ class Api:
                     "secs": round(time.monotonic() - started, 2),
                     "tokens": usage.get("output", 0),
                     "prompt": usage.get("prompt", 0),
-                    "ctx": NUM_CTX,
                 })
             if speak and gen == self._gen:
                 # fires after the last sentence has played
@@ -387,13 +440,14 @@ class Api:
         agent = self._coder
         agent.allow_edits = agent.allow_edits or bool(s.get("code_auto_edits"))
         model = s.get("model")
+        started, usage = time.monotonic(), {}
         self._set_state("thinking")
         if self._model_switch is not None:
             self._model_switch.join(timeout=120)
         self._emit("code_start", gen)
         try:
             agent.run(model, text, cancel, _CodeUI(self, gen, cancel),
-                      think=s.get("think"), web=bool(s.get("web_search")), turn=gen)
+                      think=s.get("think"), web=bool(s.get("web_search")), turn=gen, usage=usage)
             if not self._ollama.can_use_tools(model) and gen == self._gen:
                 self._emit("error", f"{model} can't use tools, so it can't read or change files. Pick a model "
                                     "that supports tools, like Qwen 3.5.")
@@ -402,10 +456,54 @@ class Api:
             if gen == self._gen:
                 self._emit("error", f"Vesper Code error: {e}")
         finally:
+            if usage.get("output"):
+                self._emit("stats", {
+                    "id": gen,
+                    "secs": round(time.monotonic() - started, 2),
+                    "tokens": usage["output"],
+                    "prompt": usage.get("prompt", 0),
+                })
             files = agent.changed_files(gen)
             if files:  # even when stopped part-way: those edits can be undone too
                 self._emit("code_checkpoint", {"id": gen, "files": files})
             self._emit("code_done", gen)
+            if gen == self._gen:
+                self._set_state("idle")
+
+    def _sandbox_stop(self):
+        """Stop the running reply and let it finish writing its history first."""
+        self._interrupt()
+        worker = self._sb_thread
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5)
+
+    def _sandbox_start(self, text, cfg):
+        self._sb_thread = threading.Thread(target=self._sandbox_turn, args=(text, cfg or {}, self._gen), daemon=True)
+        self._sb_thread.start()
+
+    def _sandbox_turn(self, text, cfg, gen):
+        with self._lock:
+            if gen != self._gen:
+                return
+            cancel = self._cancel
+        model = self._settings.get("model")
+        self._set_state("thinking")
+        if self._model_switch is not None:
+            self._model_switch.join(timeout=120)
+        ui = _SandboxUI(self, gen)
+        self._emit("sb_start", {"id": gen, "text": text})
+        try:
+            stats = self._sandbox.run(model, text, cfg, cancel, ui)
+            if gen == self._gen:
+                self._emit("ctx", {"used": stats["prompt_tokens"] + stats["reply_tokens"],
+                                   "max": int(cfg.get("num_ctx") or 8192), "mode": "sandbox"})
+            self._emit("sb_done", {"id": gen, "stats": stats})
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            self._emit("sb_done", {"id": gen, "stats": None})
+            if gen == self._gen:
+                self._emit("error", f"Ollama error: {e}")
+        finally:
             if gen == self._gen:
                 self._set_state("idle")
 
@@ -461,6 +559,37 @@ class Api:
             self._window.evaluate_js(js)
         except Exception:  # noqa: BLE001 - window closing
             pass
+
+
+class _SandboxUI:
+    """Sends one Sandbox reply's progress to the window."""
+
+    def __init__(self, api, gen):
+        self.api, self.gen = api, gen
+        self._answering = False
+
+    def _send(self, kind, payload):
+        if self.gen == self.api._gen:
+            self.api._emit(kind, {"id": self.gen, **payload})
+
+    def request(self, body, second=False):
+        self._send("sb_request", {"body": body, "second": second})
+
+    def thought(self, t):
+        self._send("sb_thought", {"t": t})
+
+    def thought_end(self, why):
+        self._send("sb_thought", {"t": f"\n\n[{why}]"})
+
+    def token(self, t, tokens):
+        if not self._answering:
+            self._answering = True
+            if self.gen == self.api._gen:
+                self.api._set_state("speaking")
+        self._send("sb_token", {"t": t, "tokens": tokens})
+
+    def note(self, text):
+        self._send("sb_note", {"t": text})
 
 
 class _CodeUI:

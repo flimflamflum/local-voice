@@ -77,6 +77,18 @@ Every file change and command asks first: **Allow**, **Allow all** (for the rest
 
 It needs a model that supports tools, such as Qwen 3.5. A small model handles small, contained jobs well; for big projects, use a bigger model (and raise `NUM_CTX` in `src/llm.py` if your GPU has room). With **Web** on, it can also search the web for docs and error messages.
 
+## Sandbox
+Switch to **Sandbox** at the top left to learn how a language model works. The right side is a plain text chat; the left side has every setting, each with a short explanation that updates as you move it:
+- **Model**: its size, precision (quantisation), trained context length and abilities.
+- **System prompt**: write your own, or start from a preset (including Vesper's real voice prompt).
+- **Thinking**: on or off, plus a thinking budget in tokens.
+- **Sampling**: temperature, top P, top K and min P, plus a button for the model's own recommended values.
+- **Repetition**, **max reply length**, **context window**, **memory** (how much of the chat is re-sent) and **stop sequences**.
+- **Seed**: fix it to get the exact same reply again.
+- **Look inside**: show the reply token by token, shaded by how unsure the model was (hover a token to see the runners-up), and the raw JSON sent to Ollama.
+
+Each reply shows its token counts, speed, time to the first token and why it stopped. **Regenerate** asks again with your new settings and keeps the old reply on screen to compare. The empty sandbox has one-click experiments to start with. Sandbox settings are saved, and its chat is separate from the main one.
+
 ## Talk to Vesper from your phone (Android)
 Your PC does all the work: Whisper, the LLM and the Kokoro voice. The phone only records your voice and plays back the reply. The app is about 2 MB and needs no models.
 

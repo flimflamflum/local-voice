@@ -60,6 +60,8 @@ MAX_UTTERANCE_BYTES = IN_RATE * 2 * 60  # 60 s of speech
 CONFIG = load_config()
 SETTINGS = Settings()  # desktop settings provide the defaults
 OLLAMA = OllamaClient(SETTINGS.get("ollama_url"))
+OLLAMA.num_ctx = int(SETTINGS.get("num_ctx"))
+OLLAMA.think_effort = SETTINGS.get("think_effort")
 TRANSCRIBER = Transcriber(SETTINGS.get("whisper_model"))
 
 # One worker each: there's one CPU-bound TTS engine and one Whisper model.
@@ -205,6 +207,9 @@ class Conversation:
             if web is None:
                 web = Settings().get("web_search")
             s["web_search"] = web = bool(web) and OLLAMA.can_use_tools(s["model"])
+            desktop = Settings()  # the desktop's context and thinking effort settings apply too
+            OLLAMA.num_ctx = int(desktop.get("num_ctx"))
+            OLLAMA.think_effort = desktop.get("think_effort")
             system = build_system_prompt(SETTINGS.get("assistant_name"), SETTINGS.get("user_name"), s["style"], web)
             messages = ([{"role": "system", "content": system}] if system else []) + list(self.history)
 

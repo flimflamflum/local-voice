@@ -10,7 +10,7 @@ from src.textutil import RepeatWatch
 
 # Qwen 3.5's attention keeps its cache tiny, so 8192 costs no extra VRAM or speed on a 4 GB card
 # (measured on a 3050: 43 tok/s at 4k, 8k and 12k; 16k fails to load). It leaves room for search results.
-NUM_CTX = 8192
+NUM_CTX = 8192  # default; the user can change it in Settings (OllamaClient.num_ctx)
 MAX_TOOL_ROUNDS = 2  # searches the model may run before it has to answer
 
 # Ollama's VRAM estimate is cautious: on a 4 GB card it puts ~25% of a 4B model on the
@@ -22,8 +22,16 @@ FULL_GPU_MAX_BYTES = 3_600_000_000
 # Thinking budget. Small models can reason for thousands of tokens; left alone they use up
 # the whole token allowance (and the 4096-token context) and never get to the answer.
 # Past either limit we stop the reasoning and have the model answer from its notes so far.
-THINK_MAX_TOKENS = 2000   # ~24 s on a 2B model, ~45 s on a 4B; leaves context for the answer
-THINK_MAX_SECONDS = 45    # big models that spill onto the CPU think far slower
+# Ollama can only switch Qwen's thinking on or off, so the effort setting (Settings > Thinking
+# effort) is this budget: (max thinking tokens, max seconds). Medium is the old fixed budget:
+# ~24 s on a 2B model, ~45 s on a 4B. The seconds matter for big models that spill onto the CPU.
+THINK_EFFORT = {
+    "low": (600, 20),
+    "medium": (2000, 45),
+    "high": (5000, 120),
+    "max": (12000, 300),
+}
+THINK_CTX_SHARE = 0.6     # thinking may use at most this much of the context; the rest is prompt + answer
 NOTES_MAX_CHARS = 6000    # how much of the cut-off reasoning to hand back (the end matters most)
 
 # Sampling Qwen recommends for its Qwen 3.5 models. The presence penalty pushes the model
@@ -57,6 +65,13 @@ class OllamaClient:
         # On Windows "localhost" tries IPv6 (::1) first; Ollama only listens on IPv4,
         # so every request stalled ~2 s before falling back. Go straight to IPv4.
         self.base_url = base_url.rstrip("/").replace("://localhost", "://127.0.0.1")
+        self.num_ctx = NUM_CTX
+        self.think_effort = "medium"
+        # Called after each finished request with the tokens the conversation now fills: the prompt
+        # plus the visible reply (thinking is thrown away afterwards, so it isn't counted). Ollama
+        # counts the whole prompt, cached or not (checked on Qwen 3.5 and llama3.1), and drops the
+        # oldest messages itself when the prompt won't fit.
+        self.on_context = None
         self._sizes = {}  # model name -> file size in bytes
         self._no_force = set()  # models that wouldn't load fully onto the GPU
         self._no_think = set()  # models Ollama says can't think (e.g. llama3.1)
@@ -71,7 +86,7 @@ class OllamaClient:
 
     def _options(self, model, **extra):
         """Chat and warm-up must send identical options, or Ollama reloads the model."""
-        opts = {"num_ctx": NUM_CTX}
+        opts = {"num_ctx": self.num_ctx}
         if model not in self._sizes:
             try:
                 self.list_models()
@@ -123,6 +138,11 @@ class OllamaClient:
             self.unload(old)
         if new:
             self.warm_up(new)
+
+    def think_budget(self):
+        """(max thinking tokens, max seconds) for the current effort, kept inside the context."""
+        tokens, seconds = THINK_EFFORT.get(self.think_effort, THINK_EFFORT["medium"])
+        return min(tokens, max(500, int(self.num_ctx * THINK_CTX_SHARE))), seconds
 
     def can_think(self, model):
         """False once Ollama has refused thinking for this model."""
@@ -176,26 +196,27 @@ class OllamaClient:
                     return
 
     def chat_step(self, model, messages, cancel, meta, tools=None, think=False, on_thinking=None,
-                  num_predict=None, sampling=None):
+                  num_predict=None, sampling=None, usage=None):
         """One model turn for an agent loop (Vesper Code): yields reply tokens, and any tool
         calls the model makes land in meta["tool_calls"] for the caller to run."""
         yield from self._one_reply(model, messages, cancel, 0.7, think, on_thinking, tools, meta,
-                                   num_predict=num_predict, sampling=sampling)
+                                   num_predict=num_predict, sampling=sampling, usage=usage)
 
     def _one_reply(self, model, messages, cancel, temperature, think, on_thinking, tools, meta,
                    num_predict=None, sampling=None, usage=None):
         """One request to the model. Tool calls it makes land in meta["tool_calls"]."""
         think = bool(think) and self.can_think(model)
         sampling = sampling or (THINK_SAMPLING if think else {"temperature": temperature})
-        num_predict = num_predict or (3072 if think else 1024)
+        max_think_tokens, max_think_seconds = self.think_budget()
+        # num_predict is the room for the reply; thinking tokens count toward it too, so add the budget.
+        num_predict = (num_predict or 1024) + (max_think_tokens if think else 0)
         body = {
             "model": model,
             "messages": messages,
             "stream": True,
             "think": think,
             "keep_alive": "30m",
-            # num_predict is a last-resort token cap (ReplyLimiter normally stops the reply far
-            # sooner). Thinking tokens count toward it too, so give a thinking model more room.
+            # num_predict is a last-resort token cap (ReplyLimiter normally stops the reply far sooner).
             "options": self._options(model, num_predict=num_predict, **sampling),
         }
         if tools and self.can_use_tools(model):
@@ -214,7 +235,7 @@ class OllamaClient:
             # Raising closes the request, so Ollama stops generating too.
             if watch.feed(text):
                 raise _ThinkingTooLong("Started repeating itself")
-            if tokens >= THINK_MAX_TOKENS or time.monotonic() - start > THINK_MAX_SECONDS:
+            if tokens >= max_think_tokens or time.monotonic() - start > max_think_seconds:
                 raise _ThinkingTooLong("Thought for too long")
 
         answered = False
@@ -285,12 +306,11 @@ class OllamaClient:
         if retry:
             yield from self._chat(body, cancel, on_thinking, meta, usage)
 
-    @staticmethod
-    def _iter(resp, cancel, on_thinking=None, meta=None, usage=None):
+    def _iter(self, resp, cancel, on_thinking=None, meta=None, usage=None):
         # Ollama reports exact token counts only in its final chunk. When we stop a reply early
         # (cut short, interrupted, thinking too long) that chunk never comes, so count the
         # streamed chunks instead: Ollama sends one per generated token.
-        chunks, counted = 0, False
+        chunks, counted, said = 0, False, 0  # said = reply tokens, without the thinking
         try:
             for line in resp.iter_lines():
                 if cancel.is_set():
@@ -304,6 +324,8 @@ class OllamaClient:
                     usage["prompt"] = usage.get("prompt", 0) + chunk.get("prompt_eval_count", 0)
                     usage["output"] = usage.get("output", 0) + chunk.get("eval_count", chunks)
                     counted = True
+                if chunk.get("done") and self.on_context:
+                    self.on_context(chunk.get("prompt_eval_count", 0) + said)
                 message = chunk.get("message", {})
                 thought = message.get("thinking", "")
                 if thought:
@@ -315,6 +337,7 @@ class OllamaClient:
                 token = message.get("content", "")
                 if token:
                     chunks += 1
+                    said += 1
                     if meta is not None:
                         meta["content"] = meta.get("content", "") + token
                     yield token
